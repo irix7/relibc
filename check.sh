@@ -103,7 +103,7 @@ if [ "$IS_HOST" -eq 0 ]; then
     fi
 fi
 
-run_redoxer() {
+run() {
     export TARGET=$1
     REDOXER_ENV="redoxer env"
     if [ "$IS_HOST" -eq 0 ]; then
@@ -147,7 +147,7 @@ if [ "$CHECK_ALL" = true ]; then
     has_error=false
 
     for target in "${SUPPORTED_TARGETS[@]}"; do
-        if ! run_redoxer "$target"; then
+        if ! run "$target"; then
             has_error=true
         fi
     done
@@ -161,7 +161,7 @@ if [ "$CHECK_ALL" = true ]; then
         exit 0
     fi
 else
-    if run_redoxer "$CURRENT_TARGET"; then
+    if run "$CURRENT_TARGET"; then
         echo -e "${GREEN}Success: $CARGO_ACTION for $CURRENT_TARGET passed.${NC}"
         exit 0
     else
