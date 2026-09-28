@@ -31,12 +31,6 @@ show_help() {
     echo "  TARGET              Sets the default target (overridden by --target)"
 }
 
-if ! command -v cbindgen &> /dev/null; then
-    echo "Error: 'cbindgen' CLI not found."
-    echo "Please install it: cargo install cbindgen"
-    exit 1
-fi
-
 SUPPORTED_TARGETS=(
     "x86_64-unknown-redox"
     "i586-unknown-redox"
@@ -95,12 +89,18 @@ while [[ $# -gt 0 ]]; do
     shift
 done
 
-if [ "$IS_HOST" -eq 0 ]; then
-if ! command -v redoxer &> /dev/null; then
-    echo "Error: 'redoxer' CLI not found."
-    echo "Please install it: cargo install redoxer"
+if ! command -v cbindgen &> /dev/null; then
+    echo "Error: 'cbindgen' CLI not found."
+    echo "Please install it: cargo install cbindgen"
     exit 1
 fi
+
+if [ "$IS_HOST" -eq 0 ]; then
+    if ! command -v redoxer &> /dev/null; then
+        echo "Error: 'redoxer' CLI not found."
+        echo "Please install it: cargo install redoxer"
+        exit 1
+    fi
 fi
 
 run_redoxer() {
