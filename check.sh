@@ -101,6 +101,18 @@ if [ "$IS_HOST" -eq 0 ]; then
         echo "Please install it: cargo install redoxer"
         exit 1
     fi
+
+    if ! command -v fusermount &> /dev/null; then
+        echo "Error: 'fusermount' CLI not found."
+        echo "Please install it using your package manager"
+        exit 1
+    fi
+
+    if ! command -v rsync &> /dev/null; then
+        echo "Error: 'rsync' CLI not found."
+        echo "Please install it using your package manager"
+        exit 1
+    fi
 fi
 
 run() {
