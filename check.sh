@@ -17,7 +17,7 @@ show_help() {
     echo "                         (note: cargo test is currently not maintained for relibc)"
     echo "  --host              Run the command on host (linux) target"
     echo "  --all-target        Run the command on all supported Redox architectures"
-    echo "  --target=<target>   Override the target architecture (e.g., i586-unknown-redox)"
+    echo "  --target=<target>   Override the target architecture (e.g., i586-unknown-redox; default: x86_64-unknown-redox)"
     echo "  --arch=<arch>       Override the target architecture using arch (e.g., i586)"
     echo "  --help              Show this help message"
     echo ""
