@@ -132,7 +132,7 @@ run_redoxer() {
 
     echo "----------------------------------------"
     echo "Running $REDOXER_ENV $CMD_ACTION $CMD_OPT for: $TARGET"
-    
+
     if $REDOXER_ENV $CMD_ACTION $CMD_OPT; then
         return 0
     else
@@ -143,15 +143,15 @@ run_redoxer() {
 
 if [ "$CHECK_ALL" = true ]; then
     echo "Running $CMD_ACTION for all supported Redox targets..."
-    
+
     has_error=false
-    
+
     for target in "${SUPPORTED_TARGETS[@]}"; do
         if ! run_redoxer "$target"; then
             has_error=true
         fi
     done
-    
+
     echo "----------------------------------------"
     if [ "$has_error" = true ]; then
         echo -e "${RED}Summary: One or more targets failed.${NC}"
