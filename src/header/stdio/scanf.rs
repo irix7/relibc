@@ -243,11 +243,10 @@ pub unsafe fn inner_scanf<T: Kind>(
 
                     macro_rules! parse_type {
                         (noformat $type:ident) => {{
-                            let n = if n.is_empty() {
-                                0 as $type
-                            } else {
-                                n.parse::<$type>().map_err(|_| 0)?
-                            };
+                            if n.is_empty() {
+                                return Ok(matched);
+                            }
+                            let n = n.parse::<$type>().map_err(|_| 0)?;
                             if !ignore {
                                 unsafe { *ap.next_arg::<*mut $type>() = n };
                                 matched += 1;
@@ -263,11 +262,10 @@ pub unsafe fn inner_scanf<T: Kind>(
                             parse_type!($type, $type)
                         };
                         ($type:ident, $final:ty) => {{
-                            let n = if n.is_empty() {
-                                0 as $type
-                            } else {
-                                $type::from_str_radix(&n, radix).map_err(|_| 0)?
-                            };
+                            if n.is_empty() {
+                                return Ok(matched);
+                            }
+                            let n = $type::from_str_radix(&n, radix).map_err(|_| 0)?;
                             if !ignore {
                                 unsafe { *ap.next_arg::<*mut $final>() = n as $final };
                                 matched += 1;
