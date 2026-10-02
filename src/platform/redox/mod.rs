@@ -1110,7 +1110,7 @@ impl Pal for Sys {
 
         let n = Self::read(fildes, &mut vec)?;
 
-        unsafe { scatter(iovs, &vec[..n]) };
+        unsafe { scatter(iovs, &vec) };
 
         Ok(n)
     }
