@@ -193,6 +193,7 @@ pub unsafe fn inner_scanf<T: Kind>(
                     };
 
                     let mut n = String::new();
+                    let mut prefixed = false;
                     let mut dot = false;
 
                     while width.map(|w| w > 0).unwrap_or(true)
@@ -208,6 +209,7 @@ pub unsafe fn inner_scanf<T: Kind>(
                             && character == '0'
                             && width.map(|w| w > 0).unwrap_or(true)
                         {
+                            prefixed = true;
                             if !pointer {
                                 radix = 8;
                             }
@@ -243,10 +245,12 @@ pub unsafe fn inner_scanf<T: Kind>(
 
                     macro_rules! parse_type {
                         (noformat $type:ident) => {{
-                            if n.is_empty() {
-                                return Ok(matched);
-                            }
-                            let n = n.parse::<$type>().map_err(|_| 0)?;
+                            let n = if n.is_empty() {
+                                if prefixed { 0 as $type }
+                                else { return Ok(matched); }
+                            } else {
+                                n.parse::<$type>().map_err(|_| 0)?
+                            };
                             if !ignore {
                                 unsafe { *ap.next_arg::<*mut $type>() = n };
                                 matched += 1;
@@ -262,10 +266,12 @@ pub unsafe fn inner_scanf<T: Kind>(
                             parse_type!($type, $type)
                         };
                         ($type:ident, $final:ty) => {{
-                            if n.is_empty() {
-                                return Ok(matched);
-                            }
-                            let n = $type::from_str_radix(&n, radix).map_err(|_| 0)?;
+                            let n = if n.is_empty() {
+                                if prefixed { 0 as $type }
+                                else { return Ok(matched); }
+                            } else {
+                                $type::from_str_radix(&n, radix).map_err(|_| 0)?
+                            };
                             if !ignore {
                                 unsafe { *ap.next_arg::<*mut $final>() = n as $final };
                                 matched += 1;
