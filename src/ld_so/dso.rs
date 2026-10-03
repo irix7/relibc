@@ -995,6 +995,19 @@ impl DSO {
 
         let jmprel = jmprel.unwrap_or_default();
 
+        // Some linkers (e.g. GNU ld on RISC-V) make DT_RELA/DT_RELASZ also cover
+        // `.rela.plt`. Those entries are processed through DT_JMPREL, so exclude
+        // them here, as glibc does.
+        if let (Some(rela_ptr), Some(len)) = (rela_offset, rela_len.as_mut())
+            && jmprel != 0
+        {
+            let start = rela_ptr as usize;
+            let end = start + *len * size_of::<Rela>();
+            if (start..end).contains(&jmprel) {
+                *len = (jmprel - start) / size_of::<Rela>();
+            }
+        }
+
         let init_array = unsafe { get_array(init_array_ptr, init_array_len) };
         let fini_array = unsafe { get_array(fini_array_ptr, fini_array_len) };
         let rela = unsafe { get_array(rela_offset, rela_len) };
