@@ -240,6 +240,7 @@ pub enum RelocationKind {
     TLSDESC,
     TPOFF,
     TPOFFELF,
+    NONE,
     UNKNOWN(u32),
 }
 
@@ -266,6 +267,7 @@ impl RelocationKind {
     pub fn new(kind: u32) -> Self {
         //WARNING: Only use R_RISCV_* constants here!
         match kind {
+            elf::R_RISCV_NONE => Self::NONE,
             elf::R_RISCV_COPY => Self::COPY,
             elf::R_RISCV_TLS_DTPMOD64 => Self::DTPMOD,
             elf::R_RISCV_TLS_DTPREL64 => Self::DTPOFF,
@@ -1071,6 +1073,10 @@ impl DSO {
     }
 
     fn static_relocate(&self, global_scope: &Scope, reloc: Relocation) -> object::Result<()> {
+        if reloc.kind == RelocationKind::NONE {
+            return Ok(());
+        }
+
         let (sym, my_sym) = if reloc.sym != STN_UNDEF {
             let name = self.dynamic.symbol_name(reloc.sym).unwrap();
 
