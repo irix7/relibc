@@ -401,11 +401,15 @@ impl DSO {
         let tcb_master = phdrs
             .iter()
             .find(|ph| ph.p_type(NativeEndian) == elf::PT_TLS)
-            .map(|ph| Master {
-                ptr: unsafe { base.byte_add(ph.p_vaddr(NativeEndian) as usize) },
-                image_size: ph.p_filesz(NativeEndian) as usize,
-                segment_size: ph.p_memsz(NativeEndian) as usize,
-                offset: tls_offset + ph.p_memsz(NativeEndian) as usize,
+            .map(|ph| {
+                let align = ph.p_align(NativeEndian).max(1) as usize;
+                let memsz = ph.p_memsz(NativeEndian) as usize;
+                Master {
+                    ptr: unsafe { base.byte_add(ph.p_vaddr(NativeEndian) as usize) },
+                    image_size: ph.p_filesz(NativeEndian) as usize,
+                    segment_size: memsz,
+                    offset: (tls_offset + memsz).next_multiple_of(align),
+                }
             })
             .unwrap();
 
@@ -699,11 +703,13 @@ impl DSO {
                             ph.p_vaddr(endian) as *const u8
                         }
                     };
+                    let align = ph.p_align(endian).max(1) as usize;
+                    let memsz = ph.p_memsz(endian) as usize;
                     tcb_master = Some(Master {
                         ptr,
                         image_size: ph.p_filesz(endian) as usize,
-                        segment_size: ph.p_memsz(endian) as usize,
-                        offset: tls_offset + ph.p_memsz(endian) as usize,
+                        segment_size: memsz,
+                        offset: (tls_offset + memsz).next_multiple_of(align),
                     });
                     log::trace!("  tcb master {:x?}", tcb_master);
                 }
