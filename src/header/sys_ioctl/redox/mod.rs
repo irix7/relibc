@@ -4,14 +4,22 @@ use syscall::{self, flag::CallFlags};
 
 use crate::{
     error::{Errno, Result},
-    header::{bits_winsize::winsize, errno::EINVAL, fcntl, termios, unistd},
+    header::{
+        bits_winsize::winsize,
+        errno::{EINVAL, ENOTTY},
+        fcntl,
+        sys_ioctl::constants::{
+            FIONBIO, SIOCATMARK, TCFLSH, TCGETS, TCSBRK, TCSETS, TCSETSF, TCSETSW, TCXONC,
+            TIOCGPGRP, TIOCGPTLCK, TIOCGPTN, TIOCGSID, TIOCGWINSZ, TIOCSCTTY, TIOCSPGRP,
+            TIOCSPTLCK, TIOCSWINSZ,
+        },
+        termios, unistd,
+    },
     platform::{
         Pal, Sys,
         types::{c_int, c_ulong, c_ulonglong, c_void, pid_t},
     },
 };
-
-use super::constants::*;
 
 // TODO: Find a better way to represent whether each call is read or write
 const REQ_READ: u64 = 0;
@@ -142,8 +150,20 @@ pub unsafe fn ioctl_inner(fd: c_int, request: c_ulong, out: *mut c_void) -> Resu
         }
         // tcsetpgrp()
         TIOCSPGRP => {
+            if unistd::isatty(fd) == 0 {
+                return Err(Errno(ENOTTY));
+            }
             let pgrp = unsafe { *(out as *const pid_t) };
-            sys_call_write(fd, TtyCall::Pgrp, &pgrp)?;
+            let procfd_usize = redox_rt::current_proc_fd().as_raw_fd();
+            let target_group = pgrp as usize;
+            let pgrpobj_handle =
+                redox_rt::sys::openat(procfd_usize, format!("pgrp/{target_group}"), 0, 0)?;
+            redox_rt::sys::sys_call_wo(
+                fd as usize,
+                &pgrpobj_handle.to_ne_bytes(),
+                CallFlags::FD,
+                &[],
+            )?;
         }
         // tcgetwinsize()
         TIOCGWINSZ => {
