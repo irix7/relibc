@@ -6,7 +6,7 @@ use crate::{
     error::{Errno, Result},
     header::{
         bits_winsize::winsize,
-        errno::{EINVAL, ENOTTY},
+        errno::EINVAL,
         fcntl,
         sys_ioctl::constants::{
             FIONBIO, SIOCATMARK, TCFLSH, TCGETS, TCSBRK, TCSETS, TCSETSF, TCSETSW, TCXONC,
@@ -150,6 +150,10 @@ pub unsafe fn ioctl_inner(fd: c_int, request: c_ulong, out: *mut c_void) -> Resu
         }
         // tcsetpgrp()
         TIOCSPGRP => {
+            let pgrp = unsafe { *(out as *const pid_t) };
+            sys_call_write(fd, TtyCall::Pgrp, &pgrp)?;
+            // TODO correct the below implementation
+            /*
             if unistd::isatty(fd) == 0 {
                 return Err(Errno(ENOTTY));
             }
@@ -158,12 +162,13 @@ pub unsafe fn ioctl_inner(fd: c_int, request: c_ulong, out: *mut c_void) -> Resu
             let target_group = pgrp as usize;
             let pgrpobj_handle =
                 redox_rt::sys::openat(procfd_usize, format!("pgrp/{target_group}"), 0, 0)?;
-            redox_rt::sys::sys_call_wo(
+            redox_rt::sys::sys_call_wo( // FIXME I think this must be incorrect
                 fd as usize,
                 &pgrpobj_handle.to_ne_bytes(),
                 CallFlags::FD,
                 &[],
             )?;
+            */
         }
         // tcgetwinsize()
         TIOCGWINSZ => {
