@@ -24,8 +24,26 @@ platform_specific! {
     "x86","i386","s";
     "x86_64","x86_64","s";
     "riscv64", "riscv64", "S";
-    "mips64", "mipsn32", "S";
 }
+
+// MIPS n32 needs two variants: the upstream files contain a
+// `#ifndef __mips_soft_float` guard around the FP save/restore, but
+// `global_asm!` is assembled without a preprocessor, so the guard never takes
+// effect.  IRIX 7 is a `+soft-float` target, and `sdc1`/`ldc1` are rejected by
+// the assembler there, so use copies with the FP block removed.
+#[cfg(all(target_arch = "mips64", not(target_os = "irix7")))]
+global_asm!(include_str!("impl/mipsn32/setjmp.S"));
+#[cfg(all(target_arch = "mips64", not(target_os = "irix7")))]
+global_asm!(include_str!("impl/mipsn32/sigsetjmp.S"));
+#[cfg(all(target_arch = "mips64", not(target_os = "irix7")))]
+global_asm!(include_str!("impl/mipsn32/longjmp.S"));
+
+#[cfg(all(target_arch = "mips64", target_os = "irix7"))]
+global_asm!(include_str!("impl/mipsn32-soft/setjmp.S"));
+#[cfg(all(target_arch = "mips64", target_os = "irix7"))]
+global_asm!(include_str!("impl/mipsn32-soft/sigsetjmp.S"));
+#[cfg(all(target_arch = "mips64", target_os = "irix7"))]
+global_asm!(include_str!("impl/mipsn32-soft/longjmp.S"));
 
 //Each platform has different sizes for sigjmp_buf, currently only x86_64 is supported
 unsafe extern "C" {

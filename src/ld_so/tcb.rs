@@ -40,6 +40,10 @@ impl Master {
 #[cfg(target_os = "linux")]
 pub type OsSpecific = ();
 
+/// IRIX 7: no signal-frame or TLS state exists yet.
+#[cfg(target_os = "irix7")]
+pub type OsSpecific = ();
+
 #[cfg(target_os = "redox")]
 pub type OsSpecific = redox_rt::signal::RtSigarea;
 
@@ -359,6 +363,18 @@ impl Tcb {
         }
     }
 
+    /// IRIX 7: the kernel does not provide TLS.
+    ///
+    /// There is no thread pointer register to program and no syscall to set
+    /// one.  Returning `Malformed` keeps `Tcb::new` from handing out a TCB that
+    /// user code would immediately dereference through `$29`.
+    #[cfg(target_os = "irix7")]
+    unsafe fn os_new(
+        _size: usize,
+    ) -> Result<(&'static mut [u8], &'static mut [u8], &'static mut [u8]), DlError> {
+        Err(DlError::Malformed)
+    }
+
     /// OS and architecture specific code to activate TLS - Linux x86_64
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     unsafe fn os_arch_activate(_os: &(), tls_end: usize, _tls_len: usize) {
@@ -391,6 +407,12 @@ impl Tcb {
             );
         }
     }
+
+    /// IRIX 7: no thread pointer exists, so there is nothing to activate.
+    ///
+    /// Unreachable today because [`Self::os_new`] refuses to allocate a TCB.
+    #[cfg(target_os = "irix7")]
+    unsafe fn os_arch_activate(_os: &(), _tls_end: usize, _tls_len: usize) {}
 
     #[cfg(target_os = "redox")]
     unsafe fn os_arch_activate(

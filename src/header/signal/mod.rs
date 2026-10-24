@@ -8,6 +8,8 @@ use cbitset::BitSet;
 
 #[cfg(target_os = "linux")]
 use crate::platform::types::c_short;
+#[cfg(target_os = "irix7")]
+use crate::platform::types::pthread_attr_t;
 #[cfg(target_os = "redox")]
 use crate::platform::types::pthread_attr_t;
 use crate::{
@@ -28,7 +30,7 @@ use super::{
     stdio::{fprintf, stderr},
 };
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "irix7"))]
 #[path = "linux.rs"]
 pub mod sys;
 

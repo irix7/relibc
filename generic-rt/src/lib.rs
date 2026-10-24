@@ -89,7 +89,7 @@ impl<Os> GenericTcb<Os> {
     ///
     /// MIPS Linux places the TCB at the thread pointer; `rdhwr $29` reads the
     /// userlocal register that the kernel maintains across context switches.
-    #[cfg(target_arch = "mips64")]
+    #[cfg(all(target_arch = "mips64", not(target_os = "irix7")))]
     pub unsafe fn arch_read(offset: usize) -> usize {
         let tp: usize;
         unsafe {
@@ -101,6 +101,17 @@ impl<Os> GenericTcb<Os> {
             );
             *((tp + offset) as *const usize)
         }
+    }
+
+    /// IRIX 7: no thread pointer and no TCB.
+    ///
+    /// `rdhwr` is a MIPS32r2/MIPS64r2 instruction, but the IRIX 7 target is
+    /// MIPS III (`+mips3`), so it cannot be used at all.  Returning zero makes
+    /// `current_ptr()` report "no TCB" instead of dereferencing an undefined
+    /// thread pointer.
+    #[cfg(all(target_arch = "mips64", target_os = "irix7"))]
+    pub unsafe fn arch_read(_offset: usize) -> usize {
+        0
     }
 
     pub unsafe fn current_ptr() -> Option<*mut Self> {

@@ -35,7 +35,10 @@ global_asm!(
 );
 
 // n32 __NR_rt_sigreturn = 6211
-#[cfg(target_arch = "mips64")]
+//
+// IRIX 7 has no signal delivery and its syscall numbers are unrelated to
+// Linux's, so this Linux-specific restorer is not emitted for irix7.
+#[cfg(all(target_arch = "mips64", not(target_os = "irix7")))]
 global_asm!(
     "
     .global __restore_rt

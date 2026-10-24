@@ -26,6 +26,16 @@ use crate::{
 use crate::sync::{Mutex, waitval::Waitval};
 
 /// Called only by the main thread, as part of relibc_start.
+#[cfg(target_os = "irix7")]
+pub unsafe fn init() {
+    // The kernel has no thread pointer and no TCB.  Creating a Pthread record
+    // would require one, so there is nothing to install.  `pthread_self()`
+    // and TLS-based pthread services are unsupported until the kernel grows a
+    // thread pointer.
+}
+
+/// Called only by the main thread, as part of relibc_start.
+#[cfg(not(target_os = "irix7"))]
 pub unsafe fn init() {
     //TODO: what is the best way to get these values?
     #[cfg(target_os = "redox")]
@@ -91,7 +101,7 @@ pub struct Pthread {
 pub struct OsTid {
     #[cfg(target_os = "redox")]
     pub thread_fd: usize,
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "irix7"))]
     pub thread_id: usize,
 }
 

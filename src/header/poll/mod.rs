@@ -65,6 +65,20 @@ impl core::fmt::Debug for pollfd {
     }
 }
 
+#[cfg(target_os = "irix7")]
+pub unsafe fn poll_epoll(fds: &mut [pollfd], timeout: c_int, _sigmask: *const sigset_t) -> c_int {
+    // IRIX 7 has a native poll syscall and no epoll at all.  The kernel
+    // ignores the timeout and reports every live descriptor as ready.
+    match unsafe { Sys::poll(fds, timeout) } {
+        Ok(ready) => ready,
+        Err(Errno(err)) => {
+            ERRNO.set(err);
+            -1
+        }
+    }
+}
+
+#[cfg(not(target_os = "irix7"))]
 pub unsafe fn poll_epoll(fds: &mut [pollfd], timeout: c_int, sigmask: *const sigset_t) -> c_int {
     let event_map = [
         (POLLIN, EPOLLIN),

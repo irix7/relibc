@@ -6,7 +6,10 @@ use crate::{
     raw_cell::RawCell,
 };
 use alloc::{boxed::Box, vec::Vec};
-use core::{cell::Cell, fmt, ptr};
+use core::{
+    cell::{Cell, UnsafeCell},
+    fmt, ptr,
+};
 
 pub use self::allocator::*;
 
@@ -28,10 +31,15 @@ pub(crate) mod sys;
 #[path = "redox/mod.rs"]
 pub(crate) mod sys;
 
+#[cfg(target_os = "irix7")]
+#[path = "irix7/mod.rs"]
+pub(crate) mod sys;
+
 pub use self::rlb::{Line, RawLineBuffer};
 pub mod rlb;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "irix7"))]
+#[path = "auxv_defs.rs"]
 pub mod auxv_defs;
 
 #[cfg(target_os = "redox")]
@@ -41,8 +49,38 @@ use self::types::{c_char, c_int};
 pub mod types;
 
 /// The global `errno` variable used internally in relibc.
+#[cfg(not(target_os = "irix7"))]
 #[thread_local]
 pub static ERRNO: Cell<c_int> = Cell::new(0);
+
+/// Single-threaded errno storage for IRIX 7.
+///
+/// The IRIX 7 kernel does not set a thread pointer and the target declares
+/// `has-thread-local: false`, so a `#[thread_local]` errno would dereference
+/// whatever `$29`/UserLocal happens to hold.  Until the kernel gains TLS and
+/// the PAL learns to activate a TCB, errno is one global.  This makes the
+/// whole library single-threaded, which matches the current kernel.
+#[cfg(target_os = "irix7")]
+pub struct SingleThreadErrno(UnsafeCell<c_int>);
+#[cfg(target_os = "irix7")]
+// SAFETY: the IRIX 7 kernel runs one thread; there is no concurrent access.
+unsafe impl Sync for SingleThreadErrno {}
+#[cfg(target_os = "irix7")]
+impl SingleThreadErrno {
+    pub fn get(&self) -> c_int {
+        // SAFETY: single-threaded as above.
+        unsafe { *self.0.get() }
+    }
+    pub fn set(&self, value: c_int) {
+        // SAFETY: single-threaded as above.
+        unsafe { *self.0.get() = value };
+    }
+    pub fn as_ptr(&self) -> *mut c_int {
+        self.0.get()
+    }
+}
+#[cfg(target_os = "irix7")]
+pub static ERRNO: SingleThreadErrno = SingleThreadErrno(UnsafeCell::new(0));
 
 /// The `argv` argument available to a program's `main` function.
 // TODO: change remaining static mut to RawCell
@@ -307,12 +345,24 @@ pub unsafe fn auxv_iter<'a>(ptr: *const usize) -> impl Iterator<Item = [usize; 2
 }
 
 #[cold]
+#[cfg(not(target_os = "irix7"))]
 pub unsafe fn get_auxvs(ptr: *const usize) -> Box<[[usize; 2]]> {
     //traverse the stack and collect argument environment variables
     let mut auxvs = unsafe { auxv_iter(ptr) }.collect::<Vec<_>>();
 
     auxvs.sort_unstable_by_key(|[kind, _]| *kind);
     auxvs.into_boxed_slice()
+}
+
+/// IRIX 7 has no auxiliary vector yet.
+///
+/// The kernel's initial stack in `kernel/src/user.rs` contains argc, argv and
+/// envp only; there is no ELF auxv terminator after them.  Iterating it would
+/// walk off into the environment strings, so report an empty vector and let
+/// relibc's getauxval paths fall back to their defaults.
+#[cfg(target_os = "irix7")]
+pub unsafe fn get_auxvs(_ptr: *const usize) -> Box<[[usize; 2]]> {
+    Vec::new().into_boxed_slice()
 }
 // TODO: Find an auxv replacement for Redox's execv protocol
 #[cold]

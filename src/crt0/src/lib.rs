@@ -1,6 +1,7 @@
 //! crt0
 
 #![no_std]
+#![feature(asm_experimental_arch)]
 #![feature(linkage)]
 
 use core::{
@@ -71,6 +72,25 @@ _start:
     mv a0, sp
     la t0, relibc_crt0
     jalr ra, t0
+"
+);
+
+// MIPS n32 (IRIX 7).  `$sp` points at the argc/argv/envp block; the kernel
+// does not provide an auxiliary vector.  `-mno-abicalls` is required by the
+// target, so use an absolute `la`/`jalr` call rather than `$gp`-relative
+// abicalls.
+#[cfg(target_arch = "mips64")]
+global_asm!(
+    "
+    .set noreorder
+    .globl _start
+    .type _start, @function
+_start:
+    move $4, $sp
+    la $25, relibc_crt0
+    jalr $25
+    nop
+    .size _start, . - _start
 "
 );
 

@@ -14,7 +14,9 @@ use crate::{
 };
 
 /// Set the close-on-exec (`FD_CLOEXEC`) flag on the new file descriptor.
-#[cfg(target_os = "linux")]
+// IRIX 7: provisional value, inherited from the Linux backend until the native
+// ABI defines its own flag set.  The kernel currently ignores epoll entirely.
+#[cfg(any(target_os = "linux", target_os = "irix7"))]
 pub const EPOLL_CLOEXEC: c_int = 0x8_0000;
 
 /// Set the close-on-exec (`FD_CLOEXEC`) flag on the new file descriptor.

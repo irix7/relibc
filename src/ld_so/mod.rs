@@ -219,3 +219,12 @@ pub unsafe fn fini() {
         linker.fini();
     }
 }
+
+/// IRIX 7: the target is statically linked (`dynamic-linking: false`) and the
+/// kernel loader maps `PT_LOAD` segments only.
+///
+/// There is no interpreter, no `PT_DYNAMIC` relocation processing and no TLS
+/// block to activate, so startup is a no-op.  `fini()` above still works: with
+/// no TCB, `Tcb::current()` returns `None`.
+#[cfg(target_os = "irix7")]
+pub unsafe fn init(_sp: &'static Stack) {}
