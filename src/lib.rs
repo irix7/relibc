@@ -8,6 +8,7 @@
 
 #![no_std]
 #![feature(alloc_error_handler)]
+#![feature(asm_experimental_arch)]
 #![feature(c_variadic)]
 #![feature(core_intrinsics)]
 #![feature(macro_derive)]

@@ -1098,6 +1098,17 @@ unsafe extern "C" {
     pub(super) fn __plt_resolve_trampoline() -> usize;
 }
 
+#[cfg(target_arch = "mips64")]
+core::arch::global_asm!(
+    "
+.global __plt_resolve_trampoline
+.hidden __plt_resolve_trampoline
+__plt_resolve_trampoline:
+    jr $ra
+    li $2, 0
+"
+);
+
 #[cfg(target_arch = "x86_64")]
 core::arch::global_asm!(
     "

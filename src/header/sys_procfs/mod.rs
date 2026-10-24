@@ -4,6 +4,11 @@ use crate::header::arch_aarch64_user::{elf_fpregset_t, elf_gregset_t};
 use crate::header::arch_riscv64_user::{elf_fpregset_t, elf_gregset_t};
 #[cfg(target_arch = "x86_64")]
 use crate::header::arch_x64_user::{elf_fpregset_t, elf_gregset_t};
+
+#[cfg(target_arch = "mips64")]
+pub type elf_gregset_t = [u64; 32];
+#[cfg(target_arch = "mips64")]
+pub type elf_fpregset_t = [u64; 32];
 use crate::platform::types::{
     c_char, c_int, c_long, c_short, c_uint, c_ulong, c_void, pid_t, size_t,
 };

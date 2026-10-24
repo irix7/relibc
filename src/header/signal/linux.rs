@@ -34,6 +34,18 @@ global_asm!(
 "
 );
 
+// n32 __NR_rt_sigreturn = 6211
+#[cfg(target_arch = "mips64")]
+global_asm!(
+    "
+    .global __restore_rt
+    __restore_rt:
+        li $2, 6211
+        syscall
+        nop
+"
+);
+
 /// Non-POSIX, see <https://www.man7.org/linux/man-pages/man7/signal.7.html>.
 ///
 /// IOT trap. A synonym for `SIGABRT`.

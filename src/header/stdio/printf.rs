@@ -244,6 +244,27 @@ impl VaArg {
         unsafe { ptr.read() }
     }
 
+    #[cfg(target_arch = "mips64")]
+    unsafe fn extract_longdouble(ap: &mut core::ffi::VaList) -> c_longdouble {
+        // MIPS n32 passes a 16-byte long double in the varargs save area.
+        #[repr(C)]
+        struct VaListInner {
+            ptr: *const c_void,
+        }
+
+        let ap_impl = unsafe {
+            let ptr_to_struct = core::ptr::from_mut::<core::ffi::VaList>(ap).cast::<VaListInner>();
+            &mut *ptr_to_struct
+        };
+
+        let ptr = ap_impl.ptr.cast::<c_longdouble>();
+        let val = unsafe { ptr.read() };
+
+        ap_impl.ptr = unsafe { ptr.add(1) }.cast::<core::ffi::c_void>();
+
+        val
+    }
+
     #[cfg(target_arch = "riscv64")]
     unsafe fn extract_longdouble(_ap: &mut core::ffi::VaList) -> c_longdouble {
         todo_skip!(0, "long double in variadic printf is not supported");

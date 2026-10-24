@@ -24,6 +24,7 @@ platform_specific! {
     "x86","i386","s";
     "x86_64","x86_64","s";
     "riscv64", "riscv64", "S";
+    "mips64", "mipsn32", "S";
 }
 
 //Each platform has different sizes for sigjmp_buf, currently only x86_64 is supported

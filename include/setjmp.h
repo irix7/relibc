@@ -17,6 +17,10 @@ typedef unsigned long long jmp_buf[16];
 typedef unsigned long long jmp_buf[26];
 #endif
 
+#if defined(__mips__)
+typedef unsigned long long jmp_buf[20];
+#endif
+
 typedef jmp_buf sigjmp_buf;
 
 #ifdef __cplusplus

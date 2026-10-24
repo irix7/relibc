@@ -1,5 +1,6 @@
 #![no_std]
 #![allow(internal_features)]
+#![feature(asm_experimental_arch)]
 #![deny(unsafe_op_in_unsafe_fn)]
 
 use core::{
@@ -82,6 +83,24 @@ impl<Os> GenericTcb<Os> {
             offset = in(reg) offset,
         );
         value
+    }
+
+    /// Architecture specific code to read a usize from the TCB - mips64 (n32)
+    ///
+    /// MIPS Linux places the TCB at the thread pointer; `rdhwr $29` reads the
+    /// userlocal register that the kernel maintains across context switches.
+    #[cfg(target_arch = "mips64")]
+    pub unsafe fn arch_read(offset: usize) -> usize {
+        let tp: usize;
+        unsafe {
+            asm!(
+                "rdhwr $3, $29",
+                "move {}, $3",
+                out(reg) tp,
+                lateout("$3") _,
+            );
+            *((tp + offset) as *const usize)
+        }
     }
 
     pub unsafe fn current_ptr() -> Option<*mut Self> {

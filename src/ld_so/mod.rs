@@ -110,7 +110,11 @@ fn static_init(
             unsafe {
                 STATIC_TCB_MASTER.ptr = p_vaddr as *const u8;
                 STATIC_TCB_MASTER.image_size = p_filesz;
-                STATIC_TCB_MASTER.offset = valign;
+                STATIC_TCB_MASTER.offset = if cfg!(target_arch = "mips64") {
+                    0
+                } else {
+                    valign
+                };
 
                 let tcb = Tcb::new(vsize).expect("failed to allocate TCB");
                 tcb.masters_ptr = ptr::addr_of_mut!(STATIC_TCB_MASTER);
@@ -147,6 +151,15 @@ pub unsafe fn init(
         core::arch::asm!(
             "mrs {}, tpidr_el0",
             out(reg) tp,
+        );
+    }
+    #[cfg(all(target_os = "linux", target_arch = "mips64"))]
+    unsafe {
+        core::arch::asm!(
+            "rdhwr $3, $29",
+            "move {}, $3",
+            out(reg) tp,
+            lateout("$3") _,
         );
     }
     #[cfg(all(target_os = "redox", target_arch = "x86"))]

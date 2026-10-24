@@ -330,8 +330,8 @@ pub unsafe extern "C" fn gethostbyaddr(
             unsafe { (*cp).copy_to(cp_slice.as_mut_ptr(), 4) };
             #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
             let cp_s_addr = unsafe { mem::transmute::<[c_char; 4], u32>(cp_slice) };
-            #[cfg(any(target_arch = "riscv64", target_arch = "aarch64"))]
-            let cp_s_addr = u32::from_ne_bytes(cp_slice);
+            #[cfg(any(target_arch = "riscv64", target_arch = "aarch64", target_arch = "mips64"))]
+            let cp_s_addr = u32::from_ne_bytes(cp_slice.map(|c| c as u8));
             if cp_s_addr == addr.s_addr {
                 unsafe { sethostent(HOST_STAYOPEN) };
                 return p;

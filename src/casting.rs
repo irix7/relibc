@@ -26,7 +26,7 @@ impl ByteLiteral {
         match input {
             b' '..=b'~' => {
                 // `c_char` is an `i8` on these arches
-                #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
+                #[cfg(any(target_arch = "x86_64", target_arch = "x86", target_arch = "mips64"))]
                 {
                     // Casting `u8` to `i8` is always safe when within the
                     // printable ascii range
@@ -56,7 +56,7 @@ impl U8PtrToCCharPtr {
     /// Unsupported architectures will panic.
     pub fn cast_const(input: *const u8) -> *const c_char {
         // `c_char` is an `i8` on these arches
-        #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
+        #[cfg(any(target_arch = "x86_64", target_arch = "x86", target_arch = "mips64"))]
         {
             return input.cast();
         }
@@ -76,7 +76,7 @@ impl U8PtrToCCharPtr {
     /// Unsupported architectures will panic.
     pub fn cast_mut(input: *const u8) -> *mut c_char {
         // `c_char` is an `i8` on these arches
-        #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
+        #[cfg(any(target_arch = "x86_64", target_arch = "x86", target_arch = "mips64"))]
         {
             // TODO replace `as` casting with something better
             return input as *mut _;
@@ -103,7 +103,7 @@ impl CCharPtrToU8Ptr {
     /// Unsupported architectures will panic.
     pub fn cast_const(input: *const c_char) -> *const u8 {
         // `c_char` is an `i8` on these arches
-        #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
+        #[cfg(any(target_arch = "x86_64", target_arch = "x86", target_arch = "mips64"))]
         {
             return input.cast();
         }
@@ -123,7 +123,7 @@ impl CCharPtrToU8Ptr {
     /// Unsupported architectures will panic.
     pub fn cast_mut(input: *const c_char) -> *mut u8 {
         // `c_char` is an `i8` on these arches
-        #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
+        #[cfg(any(target_arch = "x86_64", target_arch = "x86", target_arch = "mips64"))]
         {
             // TODO replace `as` casting with something better
             return input as *mut _;
@@ -153,7 +153,7 @@ impl CCharPtrToU8 {
     /// `input` must not be null.
     pub unsafe fn from_const(input: *const c_char) -> u8 {
         // `c_char` is an `i8` on these arches
-        #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
+        #[cfg(any(target_arch = "x86_64", target_arch = "x86", target_arch = "mips64"))]
         {
             return unsafe { *input }.cast_unsigned();
         }
@@ -179,7 +179,7 @@ impl CCharToU8 {
     /// Unsupported architectures will panic.
     pub fn cast(input: c_char) -> u8 {
         // `c_char` is an `i8` on these arches
-        #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
+        #[cfg(any(target_arch = "x86_64", target_arch = "x86", target_arch = "mips64"))]
         {
             return input.cast_unsigned();
         }

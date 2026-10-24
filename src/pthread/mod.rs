@@ -183,7 +183,7 @@ pub(crate) unsafe fn create(
             unsafe { stack.write(value) };
         };
 
-        if cfg!(target_arch = "aarch64") {
+        if cfg!(any(target_arch = "aarch64", target_arch = "mips64")) {
             // Aarch64 requires the stack to be 16 byte aligned after
             // the call instruction, unlike x86 which requires it to be
             // aligned before the call instruction. As such push an

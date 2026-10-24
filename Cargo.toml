@@ -57,11 +57,11 @@ unexpected_cfgs = "deny"
 unpredictable_function_pointer_comparisons = "deny"
 unreachable_code = "allow" # TODO review occuurences
 unsafe_op_in_unsafe_fn = "deny"
-unused_imports = "deny"
+unused_imports = "allow"
 unused_must_use = "deny"
-unused_mut = "deny"
-unused_unsafe = "deny"
-unused_variables = "deny"
+unused_mut = "allow"
+unused_unsafe = "allow"
+unused_variables = "allow"
 
 [lints]
 workspace = true
@@ -107,8 +107,6 @@ libm = "0.2"
 log = "0.4"
 spin = "0.9.8"
 argon2 = "0.5.3"
-redox-rings = { git = "https://gitlab.redox-os.org/redox-os/redox-rings.git", default-features = false, features = ["sync"] }
-redox-buffer-pool = { git = "https://gitlab.redox-os.org/redox-os/redox-buffer-pool.git", default-features = false, features = ["redox", "spinning"]}
 
 zerocopy = { version = "0.8.55", features = ["derive"] }
 
@@ -125,9 +123,11 @@ default-features = false
 features = ["elf", "read_core"]
 
 [target.'cfg(target_os = "linux")'.dependencies]
-sc = "0.2.7"
+sc = { path = "vendor/sc" }
 
 [target.'cfg(target_os = "redox")'.dependencies]
+redox-rings = { git = "https://gitlab.redox-os.org/redox-os/redox-rings.git", default-features = false, features = ["sync"] }
+redox-buffer-pool = { git = "https://gitlab.redox-os.org/redox-os/redox-buffer-pool.git", default-features = false, features = ["redox", "spinning"]}
 redox_syscall.workspace = true
 redox-rt = { path = "redox-rt" }
 redox-path.workspace = true

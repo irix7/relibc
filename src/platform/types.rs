@@ -145,8 +145,11 @@ pub type timer_t = *mut c_void;
 #[cfg(target_pointer_width = "64")]
 pub type c_longdouble = u128;
 /// The `long double` type in C.
-#[cfg(target_pointer_width = "32")]
+#[cfg(all(target_pointer_width = "32", not(target_arch = "mips64")))]
 pub type c_longdouble = [u32; 3];
+/// MIPS n32 uses IEEE binary128 (16 bytes) for long double.
+#[cfg(target_arch = "mips64")]
+pub type c_longdouble = u128;
 
 pub use crate::header::bits_pthread::*;
 

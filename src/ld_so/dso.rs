@@ -308,6 +308,12 @@ impl RelocationKind {
         }
     }
 
+    #[cfg(target_arch = "mips64")]
+    pub fn new(kind: u32) -> Self {
+        // Static linking does not process dynamic MIPS relocations yet.
+        Self::UNKNOWN(kind)
+    }
+
     #[cfg(target_arch = "x86_64")]
     pub fn new(kind: u32) -> Self {
         //WARNING: Only use R_X86_64_* constants here!
@@ -1077,7 +1083,7 @@ impl DSO {
                 )
             },
             0,
-            strtab_size,
+            u64::from(strtab_size),
         );
 
         let get_str = |entry: &Dyn| {
@@ -1553,6 +1559,11 @@ unsafe extern "C" fn __tlsdesc_static() {
 #[unsafe(naked)]
 unsafe extern "C" fn __tlsdesc_static() {
     core::arch::naked_asm!("ld a0, 8(a0)", "ret");
+}
+
+#[cfg(target_arch = "mips64")]
+unsafe extern "C" fn __tlsdesc_static(desc: *const usize) -> usize {
+    unsafe { desc.add(1).read() }
 }
 
 unsafe extern "C" {

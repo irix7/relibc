@@ -335,10 +335,28 @@ impl Tcb {
         size: usize,
     ) -> Result<(&'static mut [u8], &'static mut [u8], &'static mut [u8]), DlError> {
         let page_size = Sys::getpagesize();
-        let abi_tls_tcb = unsafe { Self::map(page_size + size + page_size)? };
-        let (abi, tls_tcb) = abi_tls_tcb.split_at_mut(page_size);
-        let (tls, tcb) = tls_tcb.split_at_mut(size);
-        Ok((abi, tls, tcb))
+
+        // MIPS n32 uses TLS_DTV_AT_TP: the hardware thread pointer is
+        // TLS block start + TLS_TCB_OFFSET (0x7000), and the TCB lives at
+        // the thread pointer. Reserve that gap in the mapping.
+        #[cfg(target_arch = "mips64")]
+        {
+            const TLS_TCB_OFFSET: usize = 0x7000;
+            assert!(size <= TLS_TCB_OFFSET);
+            let abi_tls_tcb = unsafe { Self::map(page_size + TLS_TCB_OFFSET + page_size)? };
+            let (abi, tls_tcb) = abi_tls_tcb.split_at_mut(page_size);
+            let (tls_gap, tcb) = tls_tcb.split_at_mut(TLS_TCB_OFFSET);
+            let tls = &mut tls_gap[..size];
+            return Ok((abi, tls, tcb));
+        }
+
+        #[cfg(not(target_arch = "mips64"))]
+        {
+            let abi_tls_tcb = unsafe { Self::map(page_size + size + page_size)? };
+            let (abi, tls_tcb) = abi_tls_tcb.split_at_mut(page_size);
+            let (tls, tcb) = tls_tcb.split_at_mut(size);
+            Ok((abi, tls, tcb))
+        }
     }
 
     /// OS and architecture specific code to activate TLS - Linux x86_64
@@ -347,6 +365,17 @@ impl Tcb {
         const ARCH_SET_FS: usize = 0x1002;
         unsafe {
             syscall!(ARCH_PRCTL, ARCH_SET_FS, tls_end);
+        }
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "mips64"))]
+    unsafe fn os_arch_activate(_os: &(), tls_end: usize, tls_len: usize) {
+        // MIPS n32: TP = TLS block start + 0x7000. `set_thread_area` takes
+        // the thread-pointer value directly and installs it in userlocal.
+        const TLS_TCB_OFFSET: usize = 0x7000;
+        let tp = tls_end - tls_len + TLS_TCB_OFFSET;
+        unsafe {
+            syscall!(SET_THREAD_AREA, tp);
         }
     }
 

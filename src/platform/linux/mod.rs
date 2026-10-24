@@ -678,6 +678,65 @@ impl Pal for Sys {
         Ok(crate::pthread::OsTid { thread_id: tid })
     }
 
+    #[cfg(target_arch = "mips64")]
+    unsafe fn rlct_clone(
+        stack: *mut usize,
+        _os_specific: &mut OsSpecific,
+    ) -> Result<crate::pthread::OsTid> {
+        const CLONE_SETTLS: usize = 0x0008_0000;
+        const CLONE_SYSVSEM: usize = 0x0004_0000;
+        let flags = CLONE_VM
+            | CLONE_FS
+            | CLONE_FILES
+            | CLONE_SIGHAND
+            | CLONE_THREAD
+            | CLONE_SYSVSEM
+            | CLONE_SETTLS;
+        let pid: usize;
+        unsafe {
+            asm!(
+                ".set push",
+                ".set noreorder",
+                "move  $4, $12",     // flags
+                "move  $5, $13",     // child stack
+                "move  $6, $0",      // parent_tid
+                "lw    $7, 12($5)",  // tls = new TCB == TP (MIPS: arg 4)
+                "move  $8, $0",      // child_tid (MIPS: arg 5)
+                "li    $2, {clone}",
+                "syscall",
+                "bne   $2, $0, 2f",
+                "nop",
+                // Child: pop the trampoline frame pushed by pthread::create
+                "lw    $25, 0($sp)", // new_thread_shim
+                "lw    $4, 4($sp)",  // entry_point
+                "lw    $5, 8($sp)",  // arg
+                "lw    $6, 12($sp)", // tcb
+                "lw    $7, 16($sp)", // synchronization mutex
+                "addiu $sp, $sp, 32",
+                "jalr  $25",
+                "nop",
+                "li    $2, {exit}",
+                "move  $4, $0",
+                "syscall",
+                "2:",
+                ".set pop",
+                clone = const CLONE,
+                exit = const EXIT,
+                in("$12") flags,
+                in("$13") stack,
+                lateout("$2") pid,
+                out("$4") _,
+                out("$5") _,
+                out("$6") _,
+                out("$7") _,
+                out("$8") _,
+                out("$25") _,
+            );
+        }
+        let tid = e_raw(pid)?;
+        Ok(crate::pthread::OsTid { thread_id: tid })
+    }
+
     unsafe fn rlct_kill(os_tid: crate::pthread::OsTid, signal: usize) -> Result<()> {
         let tgid = Self::getpid();
         e_raw(unsafe { syscall!(TGKILL, tgid, os_tid.thread_id, signal) }).map(|_| ())
