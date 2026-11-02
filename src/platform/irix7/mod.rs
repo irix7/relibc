@@ -7,8 +7,8 @@
 //!
 //! Real implementations are provided only for the calls the kernel actually
 //! services.  Everything else returns `ENOSYS`, which is deliberate: silently
-//! pretending to implement `fork`, sockets, signals or timers would misrepresent
-//! the platform.
+//! pretending to implement sockets, signals or timers would misrepresent the
+//! platform.
 //!
 //! Known limits of the v0 ABI:
 //!
@@ -19,8 +19,13 @@
 //! * `pthread_create` maps to `SYS_THREAD_CREATE`; the kernel is cooperative,
 //!   so a thread runs only when the creator yields, blocks or exits.  There is
 //!   no preemption and no timer wake-up.
+//! * `fork`, `execve` and `waitpid` are the local cell fast path.  A process is
+//!   one cell with a Unix personality; its `pid` is local to this replica.  The
+//!   kernel record also carries the global `Job`/`Actor` identity, home and
+//!   epochs, but a remote spawn/wait is a routed capability invocation and is
+//!   not exposed by the POSIX face in v0.
 //! * `getentropy` reports success but the kernel zero-fills the buffer.
-//! * There is no process, signal or socket support, hence the ENOSYS stubs in
+//! * There is no signal or socket support, hence the ENOSYS stubs in
 //!   [`PalSignal`], [`PalSocket`], [`PalEpoll`] and [`PalPtrace`].
 //!
 //! The file surface is the kernel's mutable ramfs: `open` with
@@ -99,6 +104,10 @@ const SYS_YIELD: usize = 38;
 const SYS_THREAD_EXIT: usize = 39;
 const SYS_FUTEX_WAIT: usize = 40;
 const SYS_FUTEX_WAKE: usize = 41;
+const SYS_FORK: usize = 42;
+const SYS_EXECVE: usize = 43;
+const SYS_WAITPID: usize = 44;
+const SYS_GETPPID: usize = 46;
 
 /// Longest a single `SYS_NANOSLEEP` parks.
 ///
@@ -164,7 +173,7 @@ struct IoAt {
 ///
 /// This mirrors `crates/native-abi/src/status.rs::status_to_errno` in the
 /// kernel repository; the two tables are the shared error contract.
-const STATUS_ERRNO: [c_int; 53] = [
+const STATUS_ERRNO: [c_int; 54] = [
     0,   // CELL_OK
     1,   // EPERM
     2,   // ENOENT
@@ -218,6 +227,7 @@ const STATUS_ERRNO: [c_int; 53] = [
     7,   // E2BIG
     24,  // EMFILE
     23,  // ENFILE
+    8,   // ENOEXEC
 ];
 
 /// Convert an absolute CLOCK_MONOTONIC deadline to a relative millisecond
@@ -359,12 +369,20 @@ impl Pal for Sys {
         Ok(fd as c_int)
     }
 
-    unsafe fn execve(
-        _path: CStr,
-        _argv: *const *mut c_char,
-        _envp: *const *mut c_char,
-    ) -> Result<()> {
-        enosys()
+    unsafe fn execve(path: CStr, argv: *const *mut c_char, envp: *const *mut c_char) -> Result<()> {
+        // The kernel loads the image from the ramfs, replaces the address
+        // space and enters the new entry point.  Success never returns here;
+        // a value is a kernel bug, not a completed exec.
+        unsafe {
+            syscall(
+                SYS_EXECVE,
+                path.as_ptr() as usize,
+                argv as usize,
+                envp as usize,
+                0,
+            )?;
+        }
+        Err(Errno(EIO))
     }
 
     unsafe fn fexecve(
@@ -462,7 +480,10 @@ impl Pal for Sys {
     }
 
     unsafe fn fork() -> Result<pid_t> {
-        enosys()
+        // The child returns 0 and the parent the local pid.  The cell identity
+        // is inherited from the new Job/Actor record, not from this integer.
+        let pid = unsafe { syscall(SYS_FORK, 0, 0, 0, 0)? };
+        Ok(pid as pid_t)
     }
 
     fn fpath(_fildes: c_int, _out: &mut [u8]) -> Result<usize> {
@@ -629,8 +650,9 @@ impl Pal for Sys {
     }
 
     fn getppid() -> pid_t {
-        // No process table; the loader runs one image.  Report "no parent".
-        0
+        unsafe { syscall(SYS_GETPPID, 0, 0, 0, 0) }
+            .map(|pid| pid as pid_t)
+            .unwrap_or(0)
     }
 
     fn getpriority(_which: c_int, _who: id_t) -> Result<c_int> {
@@ -1177,8 +1199,16 @@ impl Pal for Sys {
         unsafe { syscall(number, path.as_ptr() as usize, 0, 0, 0) }.map(|_| ())
     }
 
-    fn waitpid(_pid: pid_t, _stat_loc: Option<Out<c_int>>, _options: c_int) -> Result<pid_t> {
-        enosys()
+    fn waitpid(pid: pid_t, mut stat_loc: Option<Out<c_int>>, options: c_int) -> Result<pid_t> {
+        // The kernel blocks the parent and writes the encoded wait status into
+        // the parent's own address space when the child exits.  A null status
+        // pointer is valid and is passed as zero.
+        let status = stat_loc
+            .as_mut()
+            .map(|out| out.as_mut_ptr() as usize)
+            .unwrap_or(0);
+        let value = unsafe { syscall(SYS_WAITPID, pid as usize, status, options as usize, 0)? };
+        Ok(value as pid_t)
     }
 
     fn write(fildes: c_int, buf: &[u8]) -> Result<usize> {
