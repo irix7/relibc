@@ -12,15 +12,16 @@
 //!
 //! Known limits of the v0 ABI:
 //!
-//! * `poll` ignores its timeout; `nanosleep` is a busy wait.
+//! * `poll` and blocking descriptor I/O are bounded by the single-threaded
+//!   kernel; `nanosleep` is a busy wait.
 //! * `getentropy` reports success but the kernel zero-fills the buffer.
 //! * There is no process, thread, signal or socket support, hence the ENOSYS
 //!   stubs in [`PalSignal`], [`PalSocket`], [`PalEpoll`] and [`PalPtrace`].
 //!
 //! The file surface is the kernel's console/ramfs table: `lseek`, `pread`,
-//! `pwrite`, `dup2`, `pipe2`, `getdents` and `fcntl F_GETFD`/`F_SETFD` map to
-//! native calls, and everything else about files (creation, unlinking,
-//! permissions) returns `ENOSYS`.
+//! `pwrite`, `dup2`, `pipe2`, `poll`, `getdents` and `fcntl` `F_GETFD`/
+//! `F_SETFD`/`F_GETFL`/`F_SETFL` map to native calls, and everything else
+//! about files (creation, unlinking, permissions) returns `ENOSYS`.
 
 use core::{arch::asm, mem::size_of, num::NonZeroU64, ptr};
 
@@ -198,18 +199,20 @@ fn fill_name(field: &mut [c_char], name: &[u8]) {
 pub struct Sys;
 
 impl Sys {
-    /// passthrough to the kernel's provisional poll(2).
+    /// Poll the kernel's console, pipe and file surface.
     ///
-    /// The kernel ignores the timeout and reports every non-closed descriptor
-    /// as ready (console/null semantics), so this is only useful as a
-    /// readiness check on the bring-up fd namespace.
-    pub unsafe fn poll(fds: &mut [crate::header::poll::pollfd], _timeout: c_int) -> Result<c_int> {
-        if fds.is_empty() {
-            // No descriptors: the kernel would reject the dangling empty-slice
-            // pointer in its range check.
-            return Ok(0);
-        }
-        let ready = unsafe { syscall(SYS_POLL, fds.as_mut_ptr() as usize, fds.len(), 0, 0) }?;
+    /// `timeout` is milliseconds and is passed through: zero probes once, a
+    /// negative value asks for no deadline.  The kernel is single-threaded and
+    /// bounds a negative or long timeout internally, so this call always
+    /// returns.  `revents` is written by the kernel for every record.
+    pub unsafe fn poll(fds: &mut [crate::header::poll::pollfd], timeout: c_int) -> Result<c_int> {
+        // A zero count carries no records; the kernel ignores the pointer.
+        let pointer = if fds.is_empty() {
+            core::ptr::null_mut()
+        } else {
+            fds.as_mut_ptr()
+        };
+        let ready = unsafe { syscall(SYS_POLL, pointer as usize, fds.len(), timeout as usize, 0) }?;
         Ok(ready as c_int)
     }
 }
@@ -355,9 +358,11 @@ impl Pal for Sys {
     }
 
     fn fcntl(fildes: c_int, cmd: c_int, arg: c_ulonglong) -> Result<c_int> {
-        // The kernel treats fcntl as an unconditional success with no side
-        // effects.  Passing it through keeps F_GETFD/F_SETFD working for stdio,
-        // but no command is actually interpreted.
+        // The kernel implements F_GETFD/F_SETFD (per-descriptor close-on-exec)
+        // and F_GETFL/F_SETFL (per-description access mode and O_NONBLOCK).
+        // The flat gate passes 32-bit arguments, which is enough for the flags
+        // this ABI records; unknown commands return EINVAL rather than a fake
+        // success.
         let value = unsafe { syscall(SYS_FCNTL, fildes as usize, cmd as usize, arg as usize, 0) }?;
         Ok(value as c_int)
     }

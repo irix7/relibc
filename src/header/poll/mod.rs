@@ -68,7 +68,9 @@ impl core::fmt::Debug for pollfd {
 #[cfg(target_os = "irix7")]
 pub unsafe fn poll_epoll(fds: &mut [pollfd], timeout: c_int, _sigmask: *const sigset_t) -> c_int {
     // IRIX 7 has a native poll syscall and no epoll at all.  The kernel
-    // ignores the timeout and reports every live descriptor as ready.
+    // evaluates real pipe and console readiness, honours the millisecond
+    // timeout, and bounds a negative (no deadline) timeout because it is
+    // single-threaded.
     match unsafe { Sys::poll(fds, timeout) } {
         Ok(ready) => ready,
         Err(Errno(err)) => {
