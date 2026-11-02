@@ -12,11 +12,14 @@
 //!
 //! Known limits of the v0 ABI:
 //!
-//! * `poll` and blocking descriptor I/O are bounded by the single-threaded
-//!   kernel; `nanosleep` is a busy wait.
+//! * `poll` and blocking descriptor I/O are bounded by the cooperative kernel;
+//!   `nanosleep` is a busy wait.
+//! * `futex_wait`/`futex_wake` map to the native futex gate.  The kernel has
+//!   cooperative threads, but this PAL does not create them yet, so
+//!   `exit_thread` and `sched_yield` remain stubs for the main thread.
 //! * `getentropy` reports success but the kernel zero-fills the buffer.
-//! * There is no process, thread, signal or socket support, hence the ENOSYS
-//!   stubs in [`PalSignal`], [`PalSocket`], [`PalEpoll`] and [`PalPtrace`].
+//! * There is no process, signal or socket support, hence the ENOSYS stubs in
+//!   [`PalSignal`], [`PalSocket`], [`PalEpoll`] and [`PalPtrace`].
 //!
 //! The file surface is the kernel's mutable ramfs: `open` with
 //! `O_CREAT`/`O_EXCL`/`O_TRUNC`/`O_APPEND`, `lseek`, `pread`, `pwrite`,
@@ -34,7 +37,7 @@ use crate::{
     header::{
         bits_fcntl::SEEK_SET,
         dirent::dirent,
-        errno::{EINVAL, EIO, ENOSYS},
+        errno::{EINVAL, EIO, ENOSYS, ETIMEDOUT},
         fcntl::AT_FDCWD,
         signal::{sigaction, sigevent, siginfo_t, sigval, stack_t},
         sys_epoll::epoll_event,
@@ -89,6 +92,8 @@ const SYS_RENAME: usize = 32;
 const SYS_MKDIR: usize = 33;
 const SYS_RMDIR: usize = 34;
 const SYS_FTRUNCATE: usize = 35;
+const SYS_FUTEX_WAIT: usize = 40;
+const SYS_FUTEX_WAKE: usize = 41;
 
 /// The process umask.  `mkdir` and `open(O_CREAT)` apply it to the mode the
 /// caller passes; the kernel stores the resulting permission bits.
@@ -169,6 +174,28 @@ const STATUS_ERRNO: [c_int; 53] = [
     24,  // EMFILE
     23,  // ENFILE
 ];
+
+/// Convert an absolute CLOCK_MONOTONIC deadline to a relative millisecond
+/// timeout.
+///
+/// The kernel compares the futex word before it parks, so an already expired
+/// deadline still reports `EAGAIN` when the value changed; it reports the
+/// deadline through a zero timeout otherwise.
+unsafe fn futex_timeout_ms(deadline: &timespec) -> Result<i32> {
+    let mut now = timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    Sys::clock_gettime(1 /* CLOCK_MONOTONIC */, Out::from_mut(&mut now))?;
+    let seconds = deadline.tv_sec.saturating_sub(now.tv_sec);
+    let nanos = i64::from(deadline.tv_nsec) - i64::from(now.tv_nsec);
+    let total = seconds.saturating_mul(1_000_000_000).saturating_add(nanos);
+    if total <= 0 {
+        return Ok(0);
+    }
+    let millis = (total + 999_999) / 1_000_000;
+    Ok(millis.min(i64::from(i32::MAX)) as i32)
+}
 
 /// Invoke the native gate.
 ///
@@ -411,16 +438,54 @@ impl Pal for Sys {
         .map(|_| ())
     }
 
-    unsafe fn futex_wait(_addr: *mut u32, _val: u32, _deadline: Option<&timespec>) -> Result<()> {
-        // One thread: no one can change the word while we look at it, so there
-        // is nothing to wait for.  Reporting success keeps the generic mutex
-        // path from treating an absent futex as a fatal error.
-        Ok(())
+    #[inline]
+    unsafe fn futex_wait(addr: *mut u32, val: u32, deadline: Option<&timespec>) -> Result<()> {
+        // relibc passes an absolute CLOCK_MONOTONIC deadline, as the Linux
+        // backend does with FUTEX_WAIT_BITSET.  The native call takes a
+        // relative millisecond timeout and bounds every wait by its 100 ms
+        // poll limit, so a longer wait re-parks until the deadline is real.
+        loop {
+            let timeout = match deadline {
+                Some(deadline) => unsafe { futex_timeout_ms(deadline)? },
+                None => -1,
+            };
+            let result = unsafe {
+                syscall(
+                    SYS_FUTEX_WAIT,
+                    addr as usize,
+                    val as usize,
+                    timeout as usize,
+                    0,
+                )
+            };
+            match result {
+                Ok(_) => return Ok(()),
+                // The kernel's poll bound expired.  Without a deadline the
+                // caller asked to wait indefinitely, so park again; with one,
+                // park again until the deadline is real.
+                Err(Errno(ETIMEDOUT)) => {
+                    let remaining = match deadline {
+                        Some(deadline) => unsafe { futex_timeout_ms(deadline)? },
+                        None => 1,
+                    };
+                    if remaining == 0 {
+                        return Err(Errno(ETIMEDOUT));
+                    }
+                    continue;
+                }
+                // A changed word without a wake is reported as EAGAIN; that is
+                // the futex contract and the caller re-reads the predicate.
+                Err(error) => return Err(error),
+            }
+        }
     }
 
-    unsafe fn futex_wake(_addr: *mut u32, _num: u32) -> Result<u32> {
-        // As above: there are no waiters to wake.
-        Ok(0)
+    #[inline]
+    unsafe fn futex_wake(addr: *mut u32, num: u32) -> Result<u32> {
+        // The kernel resumes up to `num` waiters and reports the count; an
+        // empty wake is 0, not an error.
+        let woken = unsafe { syscall(SYS_FUTEX_WAKE, addr as usize, num as usize, 0, 0) }?;
+        Ok(woken as u32)
     }
 
     unsafe fn utimensat(
@@ -879,7 +944,7 @@ impl Pal for Sys {
     }
 
     fn sched_yield() -> Result<()> {
-        // Single-threaded; there is nothing to yield to.
+        // This PAL does not create threads, so the caller is the only one.
         Ok(())
     }
 
