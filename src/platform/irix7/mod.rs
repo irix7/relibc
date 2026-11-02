@@ -14,9 +14,10 @@
 //!
 //! * `poll` and blocking descriptor I/O are bounded by the cooperative kernel;
 //!   `nanosleep` is a busy wait.
-//! * `futex_wait`/`futex_wake` map to the native futex gate.  The kernel has
-//!   cooperative threads, but this PAL does not create them yet, so
-//!   `exit_thread` and `sched_yield` remain stubs for the main thread.
+//! * `futex_wait`/`futex_wake` map to the native futex gate.
+//! * `pthread_create` maps to `SYS_THREAD_CREATE`; the kernel is cooperative,
+//!   so a thread runs only when the creator yields, blocks or exits.  There is
+//!   no preemption and no timer wake-up.
 //! * `getentropy` reports success but the kernel zero-fills the buffer.
 //! * There is no process, signal or socket support, hence the ENOSYS stubs in
 //!   [`PalSignal`], [`PalSocket`], [`PalEpoll`] and [`PalPtrace`].
@@ -92,15 +93,51 @@ const SYS_RENAME: usize = 32;
 const SYS_MKDIR: usize = 33;
 const SYS_RMDIR: usize = 34;
 const SYS_FTRUNCATE: usize = 35;
+const SYS_THREAD_CREATE: usize = 37;
+const SYS_YIELD: usize = 38;
+const SYS_THREAD_EXIT: usize = 39;
 const SYS_FUTEX_WAIT: usize = 40;
 const SYS_FUTEX_WAKE: usize = 41;
+
+// First instruction of a new thread.
+//
+// `rlct_clone` hands the kernel this address and the stack pointer that
+// `pthread::create` prepared.  The prepared frame is the same one relibc's
+// Linux `clone` path consumes: `[shim, entry, arg, tcb, mutex]`.  Load the
+// arguments, drop the frame and call the shim; it never returns.
+core::arch::global_asm!(
+    r#"
+    .set noreorder
+    .set mips3
+    .globl __irix7_thread_start
+    .type __irix7_thread_start, @function
+__irix7_thread_start:
+    lw      $25, 0($29)
+    lw      $4, 4($29)
+    lw      $5, 8($29)
+    lw      $6, 12($29)
+    lw      $7, 16($29)
+    addiu   $29, $29, 32
+    jalr    $25
+    nop
+1:
+    b       1b
+    nop
+    .size __irix7_thread_start, . - __irix7_thread_start
+"#
+);
+
+unsafe extern "C" {
+    fn __irix7_thread_start();
+}
 
 /// The process umask.  `mkdir` and `open(O_CREAT)` apply it to the mode the
 /// caller passes; the kernel stores the resulting permission bits.
 static mut UMASK: mode_t = 0o022;
 
 fn umask() -> mode_t {
-    // SAFETY: single-threaded target; every access is a plain read.
+    // SAFETY: process-wide state; the cooperative kernel cannot interleave
+    // another thread between these instructions.
     unsafe { UMASK }
 }
 
@@ -246,9 +283,9 @@ impl Sys {
     /// Poll the kernel's console, pipe and file surface.
     ///
     /// `timeout` is milliseconds and is passed through: zero probes once, a
-    /// negative value asks for no deadline.  The kernel is single-threaded and
-    /// bounds a negative or long timeout internally, so this call always
-    /// returns.  `revents` is written by the kernel for every record.
+    /// negative value asks for no deadline.  The cooperative kernel bounds a
+    /// negative or long timeout internally, so this call always returns.
+    /// `revents` is written by the kernel for every record.
     pub unsafe fn poll(fds: &mut [crate::header::poll::pollfd], timeout: c_int) -> Result<c_int> {
         // A zero count carries no records; the kernel ignores the pointer.
         let pointer = if fds.is_empty() {
@@ -338,8 +375,13 @@ impl Pal for Sys {
     }
 
     unsafe fn exit_thread(_stack_base: *mut (), _stack_size: usize) -> ! {
-        // There are no threads; leaving the process is the only correct action.
-        Self::exit(0)
+        // The joinable return value is already posted on the thread's wait
+        // word.  Retiring the thread with a zero status lets the kernel resume
+        // a joiner; with none left the image ends.
+        unsafe {
+            let _ = syscall(SYS_THREAD_EXIT, 0, 0, 0, 0);
+        }
+        unreachable!("SYS_THREAD_EXIT never returns to the caller")
     }
 
     fn fchdir(_fildes: c_int) -> Result<()> {
@@ -636,8 +678,19 @@ impl Pal for Sys {
     }
 
     fn gettid() -> pid_t {
-        // Single-threaded: the thread id is the process id.
-        Self::getpid()
+        // The kernel tid is stored in the current thread's pthread record; the
+        // main thread uses tid 1 and has no table entry.
+        match crate::pthread::current_thread() {
+            Some(thread) => {
+                let tid = unsafe { thread.os_tid.get().read().thread_id };
+                if tid == 0 {
+                    Self::getpid()
+                } else {
+                    tid as pid_t
+                }
+            }
+            None => Self::getpid(),
+        }
     }
 
     fn gettimeofday(mut tp: Out<timeval>, tzp: Option<Out<timezone>>) -> Result<()> {
@@ -836,19 +889,46 @@ impl Pal for Sys {
     }
 
     unsafe fn rlct_clone(
-        _stack: *mut usize,
+        stack: *mut usize,
         _os_specific: &mut crate::ld_so::tcb::OsSpecific,
     ) -> Result<crate::pthread::OsTid, Errno> {
-        enosys()
+        // `pthread::create` pushed [shim, entry, arg, tcb, mutex] at `stack`.
+        // The kernel's `$28` argument is the 16-byte ABI header, which sits
+        // immediately before relibc's Tcb pointer in slot 3.
+        let tcb = unsafe { *stack.add(3) };
+        let Some(header) = tcb.checked_sub(16) else {
+            return Err(Errno(EINVAL));
+        };
+        let tid = unsafe {
+            syscall(
+                SYS_THREAD_CREATE,
+                __irix7_thread_start as *const () as usize,
+                stack as usize,
+                stack as usize,
+                header,
+            )
+        }?;
+        // No peer can run before the creator yields, so record the tid in the
+        // new TCB before returning to `pthread::create`.
+        let thread = tcb as *mut crate::ld_so::tcb::Tcb;
+        unsafe {
+            (*thread)
+                .pthread
+                .os_tid
+                .get()
+                .write(crate::pthread::OsTid { thread_id: tid });
+        }
+        Ok(crate::pthread::OsTid { thread_id: tid })
     }
 
     unsafe fn rlct_kill(_os_tid: crate::pthread::OsTid, _signal: usize) -> Result<()> {
+        // Cancellation needs signal delivery; the cooperative kernel has none.
         enosys()
     }
 
     fn current_os_tid() -> crate::pthread::OsTid {
         crate::pthread::OsTid {
-            thread_id: self::Sys::getpid() as usize,
+            thread_id: Self::gettid() as usize,
         }
     }
 
@@ -944,8 +1024,9 @@ impl Pal for Sys {
     }
 
     fn sched_yield() -> Result<()> {
-        // This PAL does not create threads, so the caller is the only one.
-        Ok(())
+        // With no other runnable thread the kernel returns success without
+        // switching, matching POSIX.
+        unsafe { syscall(SYS_YIELD, 0, 0, 0, 0) }.map(|_| ())
     }
 
     unsafe fn setgroups(_size: size_t, _list: *const gid_t) -> Result<()> {
@@ -1012,7 +1093,7 @@ impl Pal for Sys {
     }
 
     fn umask(mask: mode_t) -> mode_t {
-        // SAFETY: single-threaded target; swap and return the previous value.
+        // SAFETY: process-wide state; no thread can interleave here.
         unsafe {
             let previous = UMASK;
             UMASK = mask & 0o777;

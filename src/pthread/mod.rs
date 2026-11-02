@@ -1,12 +1,12 @@
 //! Relibc Threads, or RLCT.
 
 use core::{
-    cell::UnsafeCell,
+    cell::{Cell, RefCell, UnsafeCell},
     ptr,
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
-use alloc::collections::BTreeMap;
+use alloc::{collections::BTreeMap, vec::Vec};
 #[cfg(target_os = "redox")]
 use redox_rt::{
     RtTcb,
@@ -19,19 +19,36 @@ use crate::{
     ld_so::tcb::Tcb,
     platform::{
         Pal, Sys,
-        types::{c_int, c_void, clockid_t, pthread_t},
+        types::{c_int, c_void, clockid_t, pthread_key_t, pthread_t},
     },
 };
 
 use crate::sync::{Mutex, waitval::Waitval};
 
 /// Called only by the main thread, as part of relibc_start.
+///
+/// `_start` has already reset `$28` to the 16-byte main-thread header.  Build
+/// relibc's [`Tcb`] (and the [`Pthread`] record it contains) directly after
+/// it.  `crt0` reserves 1024 bytes for this and the assertion keeps the two
+/// crates in step.
 #[cfg(target_os = "irix7")]
 pub unsafe fn init() {
-    // The kernel has no thread pointer and no TCB.  Creating a Pthread record
-    // would require one, so there is nothing to install.  `pthread_self()`
-    // and TLS-based pthread services are unsupported until the kernel grows a
-    // thread pointer.
+    const MAIN_TCB_SIZE: usize = 1024;
+
+    let tp: usize;
+    unsafe {
+        core::arch::asm!("move {}, $28", out(reg) tp, options(nomem, nostack));
+    }
+    assert!(tp >= 0x1000, "main thread has no $28");
+    assert!(
+        16 + core::mem::size_of::<Tcb>() <= MAIN_TCB_SIZE,
+        "crt0's __irix7_main_tcb buffer is too small for relibc's Tcb"
+    );
+    let tcb = unsafe { Tcb::init_main(tp as *mut u8) };
+    unsafe {
+        tcb.pthread.os_tid.get().write(OsTid { thread_id: 1 });
+        tcb.activate();
+    }
 }
 
 /// Called only by the main thread, as part of relibc_start.
@@ -95,6 +112,52 @@ pub struct Pthread {
     pub(crate) tcb_selfref: UnsafeCell<*mut Tcb>,
 
     pub os_tid: UnsafeCell<OsTid>,
+
+    /// Pthread-specific values.  POSIX gives each thread its own key map, so
+    /// the single-thread `VALUES` static is not usable once create works.
+    #[cfg(target_os = "irix7")]
+    pub(crate) tls_values: RefCell<BTreeMap<pthread_key_t, crate::header::pthread::tls::Record>>,
+    /// Head of this thread's cleanup handler list.
+    #[cfg(target_os = "irix7")]
+    pub(crate) cleanup_head: Cell<*const crate::header::pthread::CleanupLinkedListEntry>,
+    /// `__cxa_thread_atexit` handlers registered by this thread.
+    #[cfg(target_os = "irix7")]
+    pub(crate) thread_dtors: RefCell<Vec<crate::cxa::CxaThreadAtExitFunc>>,
+    /// Whether the TCB sits in the mmap heap and can be released on join.
+    #[cfg(target_os = "irix7")]
+    pub(crate) tcb_heap: bool,
+}
+
+impl Pthread {
+    /// Construct the pthread record for a TCB.
+    ///
+    /// `thread_id` is the kernel tid for a running thread, or 0 for a worker
+    /// whose tid is not known until `SYS_THREAD_CREATE` returns.
+    pub(crate) fn new(tcb_selfref: *mut Tcb, thread_id: usize) -> Self {
+        #[cfg(any(target_os = "linux", target_os = "irix7"))]
+        let os_tid = OsTid { thread_id };
+        #[cfg(not(any(target_os = "linux", target_os = "irix7")))]
+        let os_tid = OsTid::default();
+
+        Self {
+            waitval: Waitval::new(),
+            has_enabled_cancelation: AtomicBool::new(false),
+            has_queued_cancelation: AtomicBool::new(false),
+            flags: PthreadFlags::empty().bits().into(),
+            stack_base: ptr::null_mut(),
+            stack_size: 0,
+            tcb_selfref: UnsafeCell::new(tcb_selfref),
+            os_tid: UnsafeCell::new(os_tid),
+            #[cfg(target_os = "irix7")]
+            tls_values: RefCell::new(BTreeMap::new()),
+            #[cfg(target_os = "irix7")]
+            cleanup_head: Cell::new(ptr::null()),
+            #[cfg(target_os = "irix7")]
+            thread_dtors: RefCell::new(Vec::new()),
+            #[cfg(target_os = "irix7")]
+            tcb_heap: false,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Ord, Eq, PartialOrd, PartialEq)]
@@ -180,6 +243,10 @@ pub(crate) unsafe fn create(
     new_tcb.pthread.flags = flags.bits().into();
     new_tcb.pthread.stack_base = stack_base;
     new_tcb.pthread.stack_size = stack_size;
+    #[cfg(target_os = "irix7")]
+    {
+        new_tcb.pthread.tcb_heap = true;
+    }
 
     new_tcb.masters_ptr = current_tcb.masters_ptr;
     new_tcb.masters_len = current_tcb.masters_len;
@@ -348,6 +415,27 @@ unsafe fn dealloc_thread(thread: &Pthread) {
     // TODO: How should this be handled on Linux?
     unsafe {
         OS_TID_TO_PTHREAD.lock().remove(&thread.os_tid.get().read());
+    }
+    // A joined worker owns its TCB and stack; a detached thread calls this
+    // from its own running stack and can only drop the table entry.
+    #[cfg(target_os = "irix7")]
+    {
+        let is_current = current_thread().is_some_and(|this| core::ptr::eq(this, thread));
+        if !is_current && thread.tcb_heap {
+            let tcb = unsafe { thread.tcb_selfref.get().read() };
+            if !tcb.is_null() {
+                // The mapping is header + TLS + TCB.
+                let tcb_len = unsafe { (&*tcb).tcb_len + (&*tcb).tls_len };
+                let stack_base = thread.stack_base;
+                let stack_size = thread.stack_size;
+                unsafe {
+                    let _ = Sys::munmap(tcb.cast::<u8>().sub(16).cast(), 16 + tcb_len);
+                    if !stack_base.is_null() && stack_size != 0 {
+                        let _ = Sys::munmap(stack_base, stack_size);
+                    }
+                }
+            }
+        }
     }
     #[cfg(target_os = "redox")]
     unsafe {

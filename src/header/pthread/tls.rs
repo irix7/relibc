@@ -20,16 +20,28 @@ use crate::{
 
 type Dtor = Option<extern "C" fn(value: *mut c_void)>;
 
-struct Record {
-    data: *mut c_void,
+#[derive(Debug)]
+pub(crate) struct Record {
+    pub(crate) data: *mut c_void,
 }
 
 #[cfg(not(target_os = "irix7"))]
 #[thread_local]
 static VALUES: RefCell<BTreeMap<pthread_key_t, Record>> = RefCell::new(BTreeMap::new());
+
+#[cfg(not(target_os = "irix7"))]
+fn with_values<R>(f: impl FnOnce(&mut BTreeMap<pthread_key_t, Record>) -> R) -> R {
+    f(&mut VALUES.borrow_mut())
+}
+
+/// Each thread owns its key map, appended to its TCB by the pthread record.
 #[cfg(target_os = "irix7")]
-static VALUES: crate::platform::SingleThread<RefCell<BTreeMap<pthread_key_t, Record>>> =
-    crate::platform::SingleThread(RefCell::new(BTreeMap::new()));
+fn with_values<R>(f: impl FnOnce(&mut BTreeMap<pthread_key_t, Record>) -> R) -> R {
+    let thread = crate::pthread::current_thread()
+        .expect("pthread-specific storage without a current thread");
+    f(&mut thread.tls_values.borrow_mut())
+}
+
 static KEYS: Mutex<BTreeMap<pthread_key_t, Dtor>> = Mutex::new(BTreeMap::new());
 static NEXTKEY: AtomicUsize = AtomicUsize::new(1);
 
@@ -42,11 +54,12 @@ pub unsafe extern "C" fn pthread_getspecific(key: pthread_key_t) -> *mut c_void 
     // do this check when debug assertions are explicitly enabled to avoid
     // acquiring the global [`KEYS`] lock when it is not necessary.
     debug_assert!(KEYS.lock().contains_key(&key));
-    VALUES
-        .borrow_mut()
-        .get(&key)
-        .map(|record| record.data)
-        .unwrap_or(ptr::null_mut())
+    with_values(|values| {
+        values
+            .get(&key)
+            .map(|record| record.data)
+            .unwrap_or(ptr::null_mut())
+    })
 }
 
 /// See <https://pubs.opengroup.org/onlinepubs/9799919799/functions/pthread_setspecific.html>.
@@ -58,14 +71,14 @@ pub unsafe extern "C" fn pthread_setspecific(key: pthread_key_t, value: *const c
         return EINVAL;
     }
 
-    let mut guard = VALUES.borrow_mut();
+    with_values(|values| {
+        let record = values.entry(key).or_insert(Record {
+            data: core::ptr::null_mut(),
+        });
+        //println!("Valid key for pthread_setspecific key {:#0x} value {:p} (was {:p})", key, value, record.data);
 
-    let record = guard.entry(key).or_insert(Record {
-        data: core::ptr::null_mut(),
+        record.data = value.cast_mut();
     });
-    //println!("Valid key for pthread_setspecific key {:#0x} value {:p} (was {:p})", key, value, record.data);
-
-    record.data = value.cast_mut();
     0
 }
 
@@ -96,8 +109,10 @@ pub unsafe extern "C" fn pthread_key_delete(key: pthread_key_t) -> c_int {
     }
 
     // POSIX recommends to return EINVAL if the value does not "refers"
-    // to this key, but we do not map VALUES back to KEYS
-    VALUES.borrow_mut().remove(&key);
+    // to this key, but we do not map pthread-specific values back to KEYS
+    with_values(|values| {
+        values.remove(&key);
+    });
 
     0
 }
@@ -115,15 +130,16 @@ pub(crate) unsafe fn run_all_destructors() {
         // According to POSIX (issue 8): There is no specific order in which we
         // have to run the destructors.
         for (key, dtor) in dtors {
-            let mut values = VALUES.borrow_mut();
-            if let Some(record) = values.get_mut(&key) {
-                let val = record.data;
-                if val.is_null() {
-                    continue;
+            let value = with_values(|values| match values.get_mut(&key) {
+                Some(record) if !record.data.is_null() => {
+                    let value = record.data;
+                    record.data = ptr::null_mut();
+                    Some(value)
                 }
-                record.data = ptr::null_mut();
-                drop(values);
-                dtor(val);
+                _ => None,
+            });
+            if let Some(value) = value {
+                dtor(value);
                 any_run = true;
             }
         }

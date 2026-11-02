@@ -329,10 +329,18 @@ pub(crate) struct CleanupLinkedListEntry {
 #[thread_local]
 pub(crate) static CLEANUP_LL_HEAD: Cell<*const CleanupLinkedListEntry> =
     Cell::new(core::ptr::null());
+
+#[cfg(not(target_os = "irix7"))]
+fn with_cleanup_head<R>(f: impl FnOnce(&Cell<*const CleanupLinkedListEntry>) -> R) -> R {
+    f(&CLEANUP_LL_HEAD)
+}
+
 #[cfg(target_os = "irix7")]
-pub(crate) static CLEANUP_LL_HEAD: crate::platform::SingleThread<
-    Cell<*const CleanupLinkedListEntry>,
-> = crate::platform::SingleThread(Cell::new(core::ptr::null()));
+fn with_cleanup_head<R>(f: impl FnOnce(&Cell<*const CleanupLinkedListEntry>) -> R) -> R {
+    let thread =
+        crate::pthread::current_thread().expect("cleanup handler without a current thread");
+    f(&thread.cleanup_head)
+}
 
 // TODO: unwind? setjmp/longjmp?
 
@@ -340,13 +348,18 @@ pub(crate) static CLEANUP_LL_HEAD: crate::platform::SingleThread<
 pub unsafe extern "C" fn __relibc_internal_pthread_cleanup_push(new_entry: *mut c_void) {
     let new_entry = unsafe { &mut *new_entry.cast::<CleanupLinkedListEntry>() };
 
-    new_entry.prev = CLEANUP_LL_HEAD.get().cast();
-    CLEANUP_LL_HEAD.set(new_entry);
+    with_cleanup_head(|head| {
+        new_entry.prev = head.get().cast();
+        head.set(new_entry);
+    });
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __relibc_internal_pthread_cleanup_pop(execute: c_int) {
-    let prev_head = unsafe { CLEANUP_LL_HEAD.get().read() };
-    CLEANUP_LL_HEAD.set(prev_head.prev.cast());
+    let prev_head = with_cleanup_head(|head| {
+        let prev_head = unsafe { head.get().read() };
+        head.set(prev_head.prev.cast());
+        prev_head
+    });
 
     if execute != 0 {
         (prev_head.routine)(prev_head.arg);
@@ -356,7 +369,7 @@ pub unsafe extern "C" fn __relibc_internal_pthread_cleanup_pop(execute: c_int) {
 pub(crate) unsafe fn run_destructor_stack() {
     unsafe { crate::cxa::__cxa_thread_finalize() };
 
-    let mut ptr = CLEANUP_LL_HEAD.get();
+    let mut ptr = with_cleanup_head(|head| head.get());
 
     while !ptr.is_null() {
         let entry = unsafe { ptr.read() };

@@ -103,15 +103,23 @@ impl<Os> GenericTcb<Os> {
         }
     }
 
-    /// IRIX 7: no thread pointer and no TCB.
+    /// Architecture specific code to read a usize from the TCB - IRIX 7
     ///
-    /// `rdhwr` is a MIPS32r2/MIPS64r2 instruction, but the IRIX 7 target is
-    /// MIPS III (`+mips3`), so it cannot be used at all.  Returning zero makes
-    /// `current_ptr()` report "no TCB" instead of dereferencing an undefined
-    /// thread pointer.
+    /// MIPS III has no `rdhwr`, so `$28` is the thread pointer.  The ABI fixes
+    /// the first 16 bytes of the TCB as libc-owned header (`self`, `dtv`,
+    /// `errno`, libc-private); relibc's [`GenericTcb`] is appended directly
+    /// after it.  `$28` therefore points at the header and every read is
+    /// relative to `$28 + 16`.
     #[cfg(all(target_arch = "mips64", target_os = "irix7"))]
-    pub unsafe fn arch_read(_offset: usize) -> usize {
-        0
+    pub unsafe fn arch_read(offset: usize) -> usize {
+        let tp: usize;
+        unsafe {
+            asm!("move {}, $28", out(reg) tp, options(nomem, nostack));
+        }
+        if tp < 0x1000 {
+            return 0;
+        }
+        unsafe { *((tp + 16 + offset) as *const usize) }
     }
 
     pub unsafe fn current_ptr() -> Option<*mut Self> {

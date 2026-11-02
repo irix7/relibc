@@ -35,6 +35,11 @@ impl Default for RlctAttr {
             // TODO
             stack: 0,
             // TODO
+            // The native kernel has a fixed 1 MiB anonymous heap shared with
+            // relibc's allocator, so a 1 MiB default stack cannot be mapped.
+            #[cfg(target_os = "irix7")]
+            stacksize: 64 * 1024,
+            #[cfg(not(target_os = "irix7"))]
             stacksize: 1024 * 1024,
             param: sched_param {
                 // TODO

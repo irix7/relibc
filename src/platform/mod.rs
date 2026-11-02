@@ -103,18 +103,17 @@ impl TcbErrno {
 #[cfg(target_os = "irix7")]
 pub static ERRNO: TcbErrno = TcbErrno;
 
-/// A `static` that is shared by the whole process because the platform has no
-/// threads.
+/// A `static` that POSIX leaves process-wide on this target.
 ///
 /// Rust requires `static` items to be `Sync`, but `Cell` and `RefCell` are
-/// deliberately not.  The IRIX 7 kernel runs one thread, so the interior
-/// mutability cannot race; this wrapper states that fact at each declaration
-/// instead of weakening the type globally.
+/// deliberately not.  The remaining user is `h_errno`, which POSIX leaves
+/// process-wide; pthread keys, cleanup handlers, thread-exit handlers and
+/// errno live in the TCB and the `Pthread` record.
 #[cfg(target_os = "irix7")]
 pub struct SingleThread<T>(pub T);
 
-// SAFETY: the IRIX 7 kernel has no threads and no signal delivery, so there is
-// no concurrent access to these values.
+// SAFETY: the cooperative kernel has no preemption and no signal delivery, so
+// these process-wide values cannot be touched concurrently between syscalls.
 #[cfg(target_os = "irix7")]
 unsafe impl<T> Sync for SingleThread<T> {}
 

@@ -1,7 +1,6 @@
-use core::{
-    cell::Cell,
-    sync::atomic::{AtomicU32 as AtomicUint, Ordering},
-};
+#[cfg(not(target_os = "irix7"))]
+use core::cell::Cell;
+use core::sync::atomic::{AtomicU32 as AtomicUint, Ordering};
 
 use crate::{
     error::Errno,
@@ -237,11 +236,18 @@ enum Ty {
 #[cfg(not(target_os = "irix7"))]
 #[thread_local]
 static CACHED_OS_TID_INVALID_AFTER_FORK: Cell<u32> = Cell::new(0);
+// Assumes TIDs are unique between processes, which I only know is true for Redox.
 #[cfg(target_os = "irix7")]
-static CACHED_OS_TID_INVALID_AFTER_FORK: crate::platform::SingleThread<Cell<u32>> =
-    crate::platform::SingleThread(Cell::new(0));
+fn os_tid_invalid_after_fork() -> u32 {
+    // Kernel tids are stable while a thread lives and come from `$28`'s TCB,
+    // so the single-thread cache below would give every thread the main tid.
+    let tid = Sys::gettid();
+    assert_ne!(tid, -1, "failed to obtain current thread ID");
+    tid.cast_unsigned()
+}
 
 // Assumes TIDs are unique between processes, which I only know is true for Redox.
+#[cfg(not(target_os = "irix7"))]
 fn os_tid_invalid_after_fork() -> u32 {
     // TODO: Coordinate better if using shared == PTHREAD_PROCESS_SHARED, with up to 2^32 separate
     // threads within possibly distinct processes, using the mutex. OS thread IDs on Redox are

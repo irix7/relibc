@@ -79,7 +79,9 @@ _start:
 // `$a3` pointing at the auxiliary vector, and `$28` zero.  Establish the
 // main-thread TCB (`self` at 0, `dtv` 0 at 4, `errno` at 8, libc-private at 12)
 // before any Rust code runs, and stash `$a3` for `Stack::auxv`.  MIPS III has
-// no `rdhwr`, so `$28` is the only thread pointer.
+// no `rdhwr`, so `$28` is the only thread pointer.  The buffer is larger than
+// the 16-byte header because relibc appends its `Tcb` and `Pthread` records
+// directly after it; `pthread::init` asserts that they fit.
 //
 // `-mno-abicalls` is required by the target, so use an absolute `la`/`jalr`
 // call rather than `$gp`-relative abicalls.
@@ -112,7 +114,7 @@ _start:
     .bss
     .align 4
 __irix7_main_tcb:
-    .space 16
+    .space 1024
 "
 );
 

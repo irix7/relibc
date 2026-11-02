@@ -224,7 +224,7 @@ pub unsafe fn fini() {
 /// kernel loader maps `PT_LOAD` segments only.
 ///
 /// There is no interpreter, no `PT_DYNAMIC` relocation processing and no TLS
-/// block to activate, so startup is a no-op.  `fini()` above still works: with
-/// no TCB, `Tcb::current()` returns `None`.
+/// block to activate, so startup is a no-op.  The main TCB that pthreads
+/// installs has a null `linker_ptr`, so `fini()` has no linker to finalise.
 #[cfg(target_os = "irix7")]
 pub unsafe fn init(_sp: &'static Stack) {}

@@ -1,10 +1,8 @@
 use alloc::vec::Vec;
 use core::{
-    cell::UnsafeCell,
     mem,
     ops::{Deref, DerefMut},
     ptr, slice,
-    sync::atomic::AtomicBool,
 };
 use generic_rt::GenericTcb;
 
@@ -12,8 +10,8 @@ use crate::{
     header::sys_mman,
     ld_so::linker::Linker,
     platform::{Pal, Sys},
-    pthread::{OsTid, Pthread},
-    sync::{mutex::Mutex, waitval::Waitval},
+    pthread::Pthread,
+    sync::mutex::Mutex,
 };
 
 use super::linker::DlError;
@@ -100,16 +98,7 @@ impl Tcb {
                 masters_len: 0,
                 num_copied_masters: 0,
                 linker_ptr: ptr::null(),
-                pthread: Pthread {
-                    waitval: Waitval::new(),
-                    flags: Default::default(),
-                    has_enabled_cancelation: AtomicBool::new(false),
-                    has_queued_cancelation: AtomicBool::new(false),
-                    stack_base: core::ptr::null_mut(),
-                    stack_size: 0,
-                    os_tid: UnsafeCell::new(OsTid::default()),
-                    tcb_selfref: UnsafeCell::new(tcb_ptr),
-                },
+                pthread: Pthread::new(tcb_ptr, 0),
 
                 dtv_ptr: ptr::null_mut(),
                 dtv_len: 0,
@@ -117,6 +106,38 @@ impl Tcb {
         );
 
         Ok(&mut *tcb_ptr)
+    }
+
+    /// Build the main thread's TCB inside the buffer `_start` reserved.
+    ///
+    /// `tp` is the 16-byte ABI header the kernel and `_start` agree on; the
+    /// relibc [`Tcb`] is appended at `tp + 16`.  The buffer is 1024 bytes in
+    /// `crt0`, and `pthread::init` asserts the appended record fits.
+    #[cfg(target_os = "irix7")]
+    pub unsafe fn init_main(tp: *mut u8) -> &'static mut Self {
+        let tcb_ptr = unsafe { tp.add(16).cast::<Self>() };
+        unsafe {
+            ptr::write(
+                tcb_ptr,
+                Self {
+                    generic: GenericTcb {
+                        tls_end: tp.add(16),
+                        tls_len: 0,
+                        tcb_ptr: tcb_ptr.cast(),
+                        tcb_len: mem::size_of::<Self>(),
+                        os_specific: OsSpecific::default(),
+                    },
+                    masters_ptr: ptr::null_mut(),
+                    masters_len: 0,
+                    num_copied_masters: 0,
+                    linker_ptr: ptr::null(),
+                    pthread: Pthread::new(tcb_ptr, 1),
+                    dtv_ptr: ptr::null_mut(),
+                    dtv_len: 0,
+                },
+            );
+            &mut *tcb_ptr
+        }
     }
 
     /// Get the current TCB
@@ -363,16 +384,30 @@ impl Tcb {
         }
     }
 
-    /// IRIX 7: the kernel does not provide TLS.
+    /// IRIX 7: allocate the 16-byte ABI header and append relibc's TCB.
     ///
-    /// There is no thread pointer register to program and no syscall to set
-    /// one.  Returning `Malformed` keeps `Tcb::new` from handing out a TCB that
-    /// user code would immediately dereference through `$29`.
+    /// `$28` points at the header, not at [`Tcb`], because the first 16 bytes
+    /// are the kernel/libc contract: `self`, `dtv`, `errno` and a libc-private
+    /// word.  The returned `tcb` slice starts after the header, so
+    /// [`Tcb::new`] writes relibc's record there and `$28 + 16` is the
+    /// [`Tcb`] pointer.
     #[cfg(target_os = "irix7")]
     unsafe fn os_new(
-        _size: usize,
+        size: usize,
     ) -> Result<(&'static mut [u8], &'static mut [u8], &'static mut [u8]), DlError> {
-        Err(DlError::Malformed)
+        let page_size = Sys::getpagesize();
+        let total = (16 + mem::size_of::<Self>() + size).next_multiple_of(page_size);
+        let mapping = unsafe { Self::map(total)? };
+        let (header, rest) = mapping.split_at_mut(16);
+        let (tls, tcb) = rest.split_at_mut(size);
+
+        let self_ptr = header.as_mut_ptr() as usize as u32;
+        header[0..4].copy_from_slice(&self_ptr.to_ne_bytes());
+        header[4..8].copy_from_slice(&0u32.to_ne_bytes());
+        header[8..12].copy_from_slice(&0i32.to_ne_bytes());
+        header[12..16].copy_from_slice(&0u32.to_ne_bytes());
+
+        Ok((header, tls, tcb))
     }
 
     /// OS and architecture specific code to activate TLS - Linux x86_64
@@ -408,11 +443,21 @@ impl Tcb {
         }
     }
 
-    /// IRIX 7: no thread pointer exists, so there is nothing to activate.
+    /// IRIX 7: `$28` is the thread pointer.
     ///
-    /// Unreachable today because [`Self::os_new`] refuses to allocate a TCB.
+    /// [`Self::os_new`] places the ABI header immediately before the TCB, so
+    /// the header is 16 bytes below `tls_end` (the TCB's own address).
     #[cfg(target_os = "irix7")]
-    unsafe fn os_arch_activate(_os: &(), _tls_end: usize, _tls_len: usize) {}
+    unsafe fn os_arch_activate(_os: &(), tls_end: usize, _tls_len: usize) {
+        let tp = tls_end - 16;
+        unsafe {
+            core::arch::asm!(
+                "move $28, {tp}",
+                tp = in(reg) tp,
+                options(nostack, nomem),
+            );
+        }
+    }
 
     #[cfg(target_os = "redox")]
     unsafe fn os_arch_activate(

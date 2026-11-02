@@ -10,20 +10,29 @@ struct CxaAtExitFunc {
     dso: usize,
 }
 
-#[derive(Clone, Copy)]
-struct CxaThreadAtExitFunc {
-    func: extern "C" fn(*mut c_void),
-    obj: *mut c_void,
-    dso: *mut c_void,
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct CxaThreadAtExitFunc {
+    pub(crate) func: extern "C" fn(*mut c_void),
+    pub(crate) obj: *mut c_void,
+    pub(crate) dso: *mut c_void,
 }
 
 static CXA_ATEXIT_FUNCS: Mutex<Vec<Option<CxaAtExitFunc>>> = Mutex::new(Vec::new());
 #[cfg(not(target_os = "irix7"))]
 #[thread_local]
 static DTORS: RefCell<Vec<CxaThreadAtExitFunc>> = RefCell::new(Vec::new());
+
+#[cfg(not(target_os = "irix7"))]
+fn with_dtors<R>(f: impl FnOnce(&mut Vec<CxaThreadAtExitFunc>) -> R) -> R {
+    f(&mut DTORS.borrow_mut())
+}
+
 #[cfg(target_os = "irix7")]
-static DTORS: crate::platform::SingleThread<RefCell<Vec<CxaThreadAtExitFunc>>> =
-    crate::platform::SingleThread(RefCell::new(Vec::new()));
+fn with_dtors<R>(f: impl FnOnce(&mut Vec<CxaThreadAtExitFunc>) -> R) -> R {
+    let thread =
+        crate::pthread::current_thread().expect("thread atexit handler without a current thread");
+    f(&mut thread.thread_dtors.borrow_mut())
+}
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __cxa_atexit(
@@ -85,13 +94,12 @@ pub unsafe extern "C" fn __cxa_thread_atexit_impl(
     dso: *mut c_void,
 ) {
     let entry = CxaThreadAtExitFunc { func, obj, dso };
-    DTORS.borrow_mut().push(entry);
+    with_dtors(|handlers| handlers.push(entry));
 }
 
 // called internally
 pub unsafe fn __cxa_thread_finalize() {
-    let mut dtors = DTORS.borrow_mut();
-    while let Some(entry) = dtors.pop() {
+    while let Some(entry) = with_dtors(|handlers| handlers.pop()) {
         (entry.func)(entry.obj);
     }
 }
