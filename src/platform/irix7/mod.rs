@@ -12,14 +12,15 @@
 //!
 //! Known limits of the v0 ABI:
 //!
-//! * The kernel's `readdir` is `(fd, index, buf, len)` returning a type byte,
-//!   not `getdents`.  [`Sys::getdents`] synthesises relibc `dirent` records and
-//!   uses the opaque offset as the kernel directory index; there is no
-//!   directory cookie to advance.
-//! * `getentropy` reports success but the kernel zero-fills the buffer.
 //! * `poll` ignores its timeout; `nanosleep` is a busy wait.
+//! * `getentropy` reports success but the kernel zero-fills the buffer.
 //! * There is no process, thread, signal or socket support, hence the ENOSYS
 //!   stubs in [`PalSignal`], [`PalSocket`], [`PalEpoll`] and [`PalPtrace`].
+//!
+//! The file surface is the kernel's console/ramfs table: `lseek`, `pread`,
+//! `pwrite`, `dup2`, `pipe2`, `getdents` and `fcntl F_GETFD`/`F_SETFD` map to
+//! native calls, and everything else about files (creation, unlinking,
+//! permissions) returns `ENOSYS`.
 
 use core::{arch::asm, mem::size_of, num::NonZeroU64, ptr};
 
@@ -28,6 +29,7 @@ use crate::{
     c_str::CStr,
     error::{Errno, Result},
     header::{
+        bits_fcntl::SEEK_SET,
         dirent::dirent,
         errno::{EINVAL, EIO, ENOSYS},
         fcntl::AT_FDCWD,
@@ -68,9 +70,27 @@ const SYS_GETPID: usize = 15;
 const SYS_READ: usize = 16;
 const SYS_FSTAT: usize = 17;
 const SYS_STAT: usize = 18;
-const SYS_READDIR: usize = 19;
 const SYS_NANOSLEEP: usize = 20;
 const SYS_CHDIR: usize = 21;
+// 19 (`readdir`) and 22 (`pipe`) remain in the kernel for the static `std`
+// shim; this PAL uses `getdents` and `pipe2`.
+const SYS_LSEEK: usize = 25;
+const SYS_PREAD: usize = 26;
+const SYS_PWRITE: usize = 27;
+const SYS_DUP2: usize = 28;
+const SYS_PIPE2: usize = 29;
+const SYS_GETDENTS: usize = 30;
+
+/// The 16-byte `pread`/`pwrite` argument block (`native_abi::io_at`).
+///
+/// The native gate has four 32-bit argument registers, so a 64-bit `off_t`
+/// cannot be passed directly.
+#[repr(C)]
+struct IoAt {
+    buf: u32,
+    len: u32,
+    offset: off_t,
+}
 
 /// Map a `CELL_E_*` status to the POSIX `errno` value.
 ///
@@ -242,9 +262,9 @@ impl Pal for Sys {
         Ok(fd as c_int)
     }
 
-    fn dup2(_fildes: c_int, _fildes2: c_int) -> Result<c_int> {
-        // dup(2) can only allocate the next free descriptor.
-        enosys()
+    fn dup2(fildes: c_int, fildes2: c_int) -> Result<c_int> {
+        let fd = unsafe { syscall(SYS_DUP2, fildes as usize, fildes2 as usize, 0, 0) }?;
+        Ok(fd as c_int)
     }
 
     unsafe fn execve(
@@ -392,63 +412,29 @@ impl Pal for Sys {
         .map(|_| ())
     }
 
-    fn getdents(fd: c_int, buf: &mut [u8], opaque_offset: u64) -> Result<usize> {
-        // relibc wants getdents records; the kernel offers
-        // readdir(fd, index, name, len) -> type.  Emit one record per call and
-        // let the caller's opaque offset act as the kernel index.
-        let dent_size = size_of::<dirent>();
-        if buf.len() < dent_size {
-            // relibc's DIR grows the buffer and retries on EINVAL.
+    fn getdents(fd: c_int, buf: &mut [u8], _opaque_offset: u64) -> Result<usize> {
+        // The kernel owns the directory cookie.  `dir_seek` writes it back
+        // with lseek, each record's d_off is the position that follows it, and
+        // the kernel advances the descriptor as it fills the buffer.
+        if buf.is_empty() {
             return Err(Errno(EINVAL));
         }
-        if opaque_offset > u32::MAX as u64 {
-            return Err(Errno(EINVAL));
-        }
-        let mut name = [0u8; 256];
-        let kind = unsafe {
+        unsafe {
             syscall(
-                SYS_READDIR,
+                SYS_GETDENTS,
                 fd as usize,
-                opaque_offset as usize,
-                name.as_mut_ptr() as usize,
-                name.len(),
+                buf.as_mut_ptr() as usize,
+                buf.len(),
+                0,
             )
-        }?;
-        match kind {
-            0 => Ok(0),
-            kind => {
-                let mut dent = dirent {
-                    d_ino: opaque_offset + 1,
-                    d_off: (opaque_offset + 1) as off_t,
-                    d_reclen: dent_size as c_ushort,
-                    d_type: kind as c_uchar,
-                    d_name: [0; 256],
-                };
-                let len = name
-                    .iter()
-                    .position(|byte| *byte == 0)
-                    .unwrap_or(name.len() - 1);
-                for (slot, byte) in dent.d_name.iter_mut().zip(&name[..len]) {
-                    *slot = *byte as c_char;
-                }
-                // SAFETY: buf is at least `dent_size` bytes and may be
-                // unaligned, so copy rather than casting to `*mut dirent`.
-                unsafe {
-                    ptr::copy_nonoverlapping(
-                        ptr::from_ref(&dent).cast::<u8>(),
-                        buf.as_mut_ptr(),
-                        dent_size,
-                    );
-                }
-                Ok(dent_size)
-            }
         }
     }
 
-    fn dir_seek(_fd: c_int, _opaque_offset: u64) -> Result<()> {
-        // No lseek(2) in the ABI.  The caller keeps the opaque offset and
-        // passes it back to getdents, so there is nothing to do here.
-        Ok(())
+    fn dir_seek(fd: c_int, opaque_offset: u64) -> Result<()> {
+        if opaque_offset > i64::MAX as u64 {
+            return Err(Errno(EINVAL));
+        }
+        Self::lseek(fd, opaque_offset as off_t, SEEK_SET).map(|_| ())
     }
 
     unsafe fn dent_reclen_offset(this_dent: &[u8], _offset: usize) -> Option<(u16, u64)> {
@@ -590,10 +576,22 @@ impl Pal for Sys {
         enosys()
     }
 
-    fn lseek(_fildes: c_int, _offset: off_t, _whence: c_int) -> Result<off_t> {
-        // File descriptors carry an implicit offset in the kernel, but there
-        // is no way to read or set it.
-        enosys()
+    fn lseek(fildes: c_int, offset: off_t, whence: c_int) -> Result<off_t> {
+        // The 64-bit offset is split across `$a1` and `$a2` because the flat
+        // gate has four 32-bit argument registers.
+        let bits = offset as u64;
+        let low = bits as u32;
+        let high = (bits >> 32) as u32;
+        let value = unsafe {
+            syscall(
+                SYS_LSEEK,
+                fildes as usize,
+                low as usize,
+                high as usize,
+                whence as usize,
+            )
+        }?;
+        Ok(value as off_t)
     }
 
     fn mkdirat(_fildes: c_int, _path: CStr, _mode: mode_t) -> Result<()> {
@@ -683,18 +681,39 @@ impl Pal for Sys {
         Ok(fd as c_int)
     }
 
-    fn pipe2(_fildes: Out<[c_int; 2]>, _flags: c_int) -> Result<()> {
-        enosys()
+    fn pipe2(mut fildes: Out<[c_int; 2]>, flags: c_int) -> Result<()> {
+        unsafe {
+            syscall(
+                SYS_PIPE2,
+                fildes.as_mut_ptr().cast::<c_int>() as usize,
+                flags as usize,
+                0,
+                0,
+            )
+        }
+        .map(|_| ())
     }
 
     fn posix_fallocate(_fd: c_int, _offset: u64, _length: NonZeroU64) -> Result<()> {
         enosys()
     }
 
-    fn posix_getdents(_fildes: c_int, _buf: &mut [u8]) -> Result<usize> {
-        // The default implementation needs lseek to read and advance the
-        // directory position; the ABI has neither.  Use readdir(3) instead.
-        enosys()
+    fn posix_getdents(fildes: c_int, buf: &mut [u8]) -> Result<usize> {
+        // POSIX-2024: read from the descriptor's current position, which the
+        // kernel directory reads and advances.  A buffer too small for one
+        // record is EINVAL, as the standard requires.
+        if buf.is_empty() {
+            return Err(Errno(EINVAL));
+        }
+        unsafe {
+            syscall(
+                SYS_GETDENTS,
+                fildes as usize,
+                buf.as_mut_ptr() as usize,
+                buf.len(),
+                0,
+            )
+        }
     }
 
     unsafe fn rlct_clone(
@@ -732,8 +751,25 @@ impl Pal for Sys {
         Ok(count)
     }
 
-    fn pread(_fildes: c_int, _buf: &mut [u8], _offset: off_t) -> Result<usize> {
-        enosys()
+    fn pread(fildes: c_int, buf: &mut [u8], offset: off_t) -> Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        let block = IoAt {
+            buf: buf.as_mut_ptr() as usize as u32,
+            len: buf.len() as u32,
+            offset,
+        };
+        let count = unsafe {
+            syscall(
+                SYS_PREAD,
+                fildes as usize,
+                &block as *const IoAt as usize,
+                0,
+                0,
+            )
+        }?;
+        Ok(count)
     }
 
     unsafe fn readv(fildes: c_int, iov: *const iovec, iovcnt: c_int) -> Result<usize> {
@@ -889,8 +925,25 @@ impl Pal for Sys {
         Ok(count)
     }
 
-    fn pwrite(_fildes: c_int, _buf: &[u8], _offset: off_t) -> Result<usize> {
-        enosys()
+    fn pwrite(fildes: c_int, buf: &[u8], offset: off_t) -> Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        let block = IoAt {
+            buf: buf.as_ptr() as usize as u32,
+            len: buf.len() as u32,
+            offset,
+        };
+        let count = unsafe {
+            syscall(
+                SYS_PWRITE,
+                fildes as usize,
+                &block as *const IoAt as usize,
+                0,
+                0,
+            )
+        }?;
+        Ok(count)
     }
 
     unsafe fn writev(fildes: c_int, iov: *const iovec, iovcnt: c_int) -> Result<usize> {
@@ -1143,6 +1196,11 @@ const _: () = {
     assert!(offset_of!(dirent, d_reclen) == 16);
     assert!(offset_of!(dirent, d_type) == 18);
     assert!(offset_of!(dirent, d_name) == 19);
+
+    assert!(size_of::<IoAt>() == 16);
+    assert!(offset_of!(IoAt, buf) == 0);
+    assert!(offset_of!(IoAt, len) == 4);
+    assert!(offset_of!(IoAt, offset) == 8);
 
     assert!(size_of::<pollfd>() == 8);
     assert!(offset_of!(pollfd, revents) == 6);
