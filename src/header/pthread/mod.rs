@@ -330,9 +330,9 @@ pub(crate) struct CleanupLinkedListEntry {
 pub(crate) static CLEANUP_LL_HEAD: Cell<*const CleanupLinkedListEntry> =
     Cell::new(core::ptr::null());
 #[cfg(target_os = "irix7")]
-pub(crate) static CLEANUP_LL_HEAD:
-    crate::platform::SingleThread<Cell<*const CleanupLinkedListEntry>> =
-    crate::platform::SingleThread(Cell::new(core::ptr::null()));
+pub(crate) static CLEANUP_LL_HEAD: crate::platform::SingleThread<
+    Cell<*const CleanupLinkedListEntry>,
+> = crate::platform::SingleThread(Cell::new(core::ptr::null()));
 
 // TODO: unwind? setjmp/longjmp?
 

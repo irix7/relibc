@@ -21,12 +21,7 @@
 //! * There is no process, thread, signal or socket support, hence the ENOSYS
 //!   stubs in [`PalSignal`], [`PalSocket`], [`PalEpoll`] and [`PalPtrace`].
 
-use core::{
-    arch::asm,
-    mem::size_of,
-    num::NonZeroU64,
-    ptr,
-};
+use core::{arch::asm, mem::size_of, num::NonZeroU64, ptr};
 
 use super::{Pal, PalEpoll, PalPtrace, PalSignal, PalSocket, types::*};
 use crate::{
@@ -308,16 +303,7 @@ impl Pal for Sys {
 
     fn fstat(fildes: c_int, mut buf: Out<stat>) -> Result<()> {
         // The kernel writes relibc's 136-byte n32 `struct stat` directly.
-        unsafe {
-            syscall(
-                SYS_FSTAT,
-                fildes as usize,
-                buf.as_mut_ptr() as usize,
-                0,
-                0,
-            )
-        }
-        .map(|_| ())
+        unsafe { syscall(SYS_FSTAT, fildes as usize, buf.as_mut_ptr() as usize, 0, 0) }.map(|_| ())
     }
 
     fn fstatat(fildes: c_int, path: Option<CStr>, mut buf: Out<stat>, _flags: c_int) -> Result<()> {
@@ -330,7 +316,13 @@ impl Pal for Sys {
                     return enosys();
                 }
                 unsafe {
-                    syscall(SYS_STAT, path.as_ptr() as usize, buf.as_mut_ptr() as usize, 0, 0)
+                    syscall(
+                        SYS_STAT,
+                        path.as_ptr() as usize,
+                        buf.as_mut_ptr() as usize,
+                        0,
+                        0,
+                    )
                 }?;
                 return Ok(());
             }
@@ -346,15 +338,7 @@ impl Pal for Sys {
         // The kernel treats fcntl as an unconditional success with no side
         // effects.  Passing it through keeps F_GETFD/F_SETFD working for stdio,
         // but no command is actually interpreted.
-        let value = unsafe {
-            syscall(
-                SYS_FCNTL,
-                fildes as usize,
-                cmd as usize,
-                arg as usize,
-                0,
-            )
-        }?;
+        let value = unsafe { syscall(SYS_FCNTL, fildes as usize, cmd as usize, arg as usize, 0) }?;
         Ok(value as c_int)
     }
 
@@ -643,15 +627,8 @@ impl Pal for Sys {
     ) -> Result<*mut c_void> {
         // Provisional mmap(addr, length, prot, flags): the kernel ignores the
         // address, protection and flags and bumps a fixed 1 MiB heap.
-        let address = unsafe {
-            syscall(
-                SYS_MMAP,
-                addr as usize,
-                len,
-                prot as usize,
-                flags as usize,
-            )
-        }?;
+        let address =
+            unsafe { syscall(SYS_MMAP, addr as usize, len, prot as usize, flags as usize) }?;
         Ok(address as *mut c_void)
     }
 
@@ -1142,8 +1119,8 @@ impl PalSocket for Sys {
 // conversion are pinned here so an ABI change fails the build rather than the
 // first stat() at runtime.
 const _: () = {
-    use core::mem::offset_of;
     use crate::header::{dirent::dirent, poll::pollfd, time::timespec};
+    use core::mem::offset_of;
 
     assert!(size_of::<stat>() == 136);
     assert!(offset_of!(stat, st_nlink) == 16);
