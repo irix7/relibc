@@ -18,10 +18,12 @@
 //! * There is no process, thread, signal or socket support, hence the ENOSYS
 //!   stubs in [`PalSignal`], [`PalSocket`], [`PalEpoll`] and [`PalPtrace`].
 //!
-//! The file surface is the kernel's console/ramfs table: `lseek`, `pread`,
-//! `pwrite`, `dup2`, `pipe2`, `poll`, `getdents` and `fcntl` `F_GETFD`/
-//! `F_SETFD`/`F_GETFL`/`F_SETFL` map to native calls, and everything else
-//! about files (creation, unlinking, permissions) returns `ENOSYS`.
+//! The file surface is the kernel's mutable ramfs: `open` with
+//! `O_CREAT`/`O_EXCL`/`O_TRUNC`/`O_APPEND`, `lseek`, `pread`, `pwrite`,
+//! `ftruncate`, `truncate`, `dup2`, `pipe2`, `poll`, `getdents`, `unlink`,
+//! `mkdir`, `rmdir`, `rename` and `fcntl` `F_GETFD`/`F_SETFD`/`F_GETFL`/
+//! `F_SETFL` map to native calls.  Permissions, ownership, links and symbolic
+//! links are not implemented and return `ENOSYS`.
 
 use core::{arch::asm, mem::size_of, num::NonZeroU64, ptr};
 
@@ -81,6 +83,21 @@ const SYS_PWRITE: usize = 27;
 const SYS_DUP2: usize = 28;
 const SYS_PIPE2: usize = 29;
 const SYS_GETDENTS: usize = 30;
+
+const SYS_UNLINK: usize = 31;
+const SYS_RENAME: usize = 32;
+const SYS_MKDIR: usize = 33;
+const SYS_RMDIR: usize = 34;
+const SYS_FTRUNCATE: usize = 35;
+
+/// The process umask.  `mkdir` and `open(O_CREAT)` apply it to the mode the
+/// caller passes; the kernel stores the resulting permission bits.
+static mut UMASK: mode_t = 0o022;
+
+fn umask() -> mode_t {
+    // SAFETY: single-threaded target; every access is a plain read.
+    unsafe { UMASK }
+}
 
 /// The 16-byte `pread`/`pwrite` argument block (`native_abi::io_at`).
 ///
@@ -379,8 +396,19 @@ impl Pal for Sys {
         enosys()
     }
 
-    fn ftruncate(_fildes: c_int, _length: off_t) -> Result<()> {
-        enosys()
+    fn ftruncate(fildes: c_int, length: off_t) -> Result<()> {
+        // The 64-bit length is split across `$a1` and `$a2`, like `lseek`.
+        let bits = length as u64;
+        unsafe {
+            syscall(
+                SYS_FTRUNCATE,
+                fildes as usize,
+                bits as u32 as usize,
+                (bits >> 32) as u32 as usize,
+                0,
+            )
+        }
+        .map(|_| ())
     }
 
     unsafe fn futex_wait(_addr: *mut u32, _val: u32, _deadline: Option<&timespec>) -> Result<()> {
@@ -599,8 +627,21 @@ impl Pal for Sys {
         Ok(value as off_t)
     }
 
-    fn mkdirat(_fildes: c_int, _path: CStr, _mode: mode_t) -> Result<()> {
-        enosys()
+    fn mkdirat(fildes: c_int, path: CStr, mode: mode_t) -> Result<()> {
+        if fildes != AT_FDCWD {
+            // Relative paths always resolve against the kernel cwd.
+            return enosys();
+        }
+        unsafe {
+            syscall(
+                SYS_MKDIR,
+                path.as_ptr() as usize,
+                (mode & !umask()) as usize,
+                0,
+                0,
+            )
+        }
+        .map(|_| ())
     }
 
     fn mkfifoat(_dir_fd: c_int, _path: CStr, _mode: mode_t) -> Result<()> {
@@ -677,12 +718,20 @@ impl Pal for Sys {
         unsafe { syscall(SYS_NANOSLEEP, rqtp as usize, 0, 0, 0) }.map(|_| ())
     }
 
-    fn openat(dirfd: c_int, path: CStr, oflag: c_int, _mode: mode_t) -> Result<c_int> {
+    fn openat(dirfd: c_int, path: CStr, oflag: c_int, mode: mode_t) -> Result<c_int> {
         if dirfd != AT_FDCWD {
             // Relative paths always resolve against the kernel cwd.
             return enosys();
         }
-        let fd = unsafe { syscall(SYS_OPEN, path.as_ptr() as usize, oflag as usize, 0, 0) }?;
+        let fd = unsafe {
+            syscall(
+                SYS_OPEN,
+                path.as_ptr() as usize,
+                oflag as usize,
+                (mode & !umask()) as usize,
+                0,
+            )
+        }?;
         Ok(fd as c_int)
     }
 
@@ -802,13 +851,31 @@ impl Pal for Sys {
     }
 
     fn renameat2(
-        _old_dir: c_int,
-        _old_path: CStr,
-        _new_dir: c_int,
-        _new_path: CStr,
-        _flags: c_uint,
+        old_dir: c_int,
+        old_path: CStr,
+        new_dir: c_int,
+        new_path: CStr,
+        flags: c_uint,
     ) -> Result<()> {
-        enosys()
+        if old_dir != AT_FDCWD || new_dir != AT_FDCWD {
+            // Relative paths always resolve against the kernel cwd.
+            return enosys();
+        }
+        if flags != 0 {
+            // RENAME_NOREPLACE/RENAME_EXCHANGE have no kernel support; a
+            // silent rename would give the caller the wrong guarantee.
+            return Err(Errno(EINVAL));
+        }
+        unsafe {
+            syscall(
+                SYS_RENAME,
+                old_path.as_ptr() as usize,
+                new_path.as_ptr() as usize,
+                0,
+                0,
+            )
+        }
+        .map(|_| ())
     }
 
     fn sched_yield() -> Result<()> {
@@ -879,10 +946,13 @@ impl Pal for Sys {
         enosys()
     }
 
-    fn umask(_mask: mode_t) -> mode_t {
-        // No file creation, so no umask state to keep.  Report the conventional
-        // default rather than inventing persistence the kernel does not have.
-        0o022
+    fn umask(mask: mode_t) -> mode_t {
+        // SAFETY: single-threaded target; swap and return the previous value.
+        unsafe {
+            let previous = UMASK;
+            UMASK = mask & 0o777;
+            previous
+        }
     }
 
     fn uname(mut utsname: Out<utsname>) -> Result<()> {
@@ -906,8 +976,20 @@ impl Pal for Sys {
         Ok(())
     }
 
-    fn unlinkat(_fd: c_int, _path: CStr, _flags: c_int) -> Result<()> {
-        enosys()
+    fn unlinkat(fd: c_int, path: CStr, flags: c_int) -> Result<()> {
+        if fd != AT_FDCWD {
+            // Relative paths always resolve against the kernel cwd.
+            return enosys();
+        }
+        if flags & !crate::header::fcntl::AT_REMOVEDIR != 0 {
+            return Err(Errno(EINVAL));
+        }
+        let number = if flags & crate::header::fcntl::AT_REMOVEDIR != 0 {
+            SYS_RMDIR
+        } else {
+            SYS_UNLINK
+        };
+        unsafe { syscall(number, path.as_ptr() as usize, 0, 0, 0) }.map(|_| ())
     }
 
     fn waitpid(_pid: pid_t, _stat_loc: Option<Out<c_int>>, _options: c_int) -> Result<pid_t> {
