@@ -13,7 +13,8 @@
 //! Known limits of the v0 ABI:
 //!
 //! * `poll` and blocking descriptor I/O are bounded by the cooperative kernel;
-//!   `nanosleep` is a busy wait.
+//!   `nanosleep` parks the thread and lets a cooperative peer run, and the
+//!   kernel drives the deadline from CP0 Count.
 //! * `futex_wait`/`futex_wake` map to the native futex gate.
 //! * `pthread_create` maps to `SYS_THREAD_CREATE`; the kernel is cooperative,
 //!   so a thread runs only when the creator yields, blocks or exits.  There is
@@ -98,6 +99,13 @@ const SYS_YIELD: usize = 38;
 const SYS_THREAD_EXIT: usize = 39;
 const SYS_FUTEX_WAIT: usize = 40;
 const SYS_FUTEX_WAKE: usize = 41;
+
+/// Longest a single `SYS_NANOSLEEP` parks.
+///
+/// The kernel bounds one park so the Count deadline stays below half the
+/// 32-bit timer range; `nanosleep` re-arms with the remainder.  This mirrors
+/// `SLEEP_LIMIT_MS` in `docs/spec/native-abi.md` §5.9.
+const SLEEP_LIMIT_MS: u64 = 60_000;
 
 // First instruction of a new thread.
 //
@@ -832,8 +840,39 @@ impl Pal for Sys {
     }
 
     unsafe fn nanosleep(rqtp: *const timespec, _rmtp: *mut timespec) -> Result<()> {
-        // The kernel busy-waits and does not report the remaining time.
-        unsafe { syscall(SYS_NANOSLEEP, rqtp as usize, 0, 0, 0) }.map(|_| ())
+        // The kernel parks the calling thread until a CP0 Count deadline and
+        // lets a cooperative peer run.  One park is bounded so the deadline
+        // stays inside half the 32-bit timer range; an interval longer than
+        // that is re-armed with the remainder.  There are no signals, so the
+        // call is never interrupted and `rmtp` is not written.
+        if rqtp.is_null() {
+            return Err(Errno(EINVAL));
+        }
+        let request = unsafe { &*rqtp };
+        if request.tv_sec < 0 || request.tv_nsec < 0 || request.tv_nsec >= 1_000_000_000 {
+            return Err(Errno(EINVAL));
+        }
+        let mut remaining = (request.tv_sec as u64)
+            .saturating_mul(1_000_000_000)
+            .saturating_add(request.tv_nsec as u64);
+        while remaining > 0 {
+            let chunk = remaining.min(SLEEP_LIMIT_MS * 1_000_000);
+            let chunk_request = timespec {
+                tv_sec: (chunk / 1_000_000_000) as time_t,
+                tv_nsec: (chunk % 1_000_000_000) as c_long,
+            };
+            unsafe {
+                syscall(
+                    SYS_NANOSLEEP,
+                    &chunk_request as *const timespec as usize,
+                    0,
+                    0,
+                    0,
+                )
+            }?;
+            remaining -= chunk;
+        }
+        Ok(())
     }
 
     fn openat(dirfd: c_int, path: CStr, oflag: c_int, mode: mode_t) -> Result<c_int> {

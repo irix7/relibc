@@ -269,14 +269,15 @@ pub unsafe extern "C" fn thrd_join(thrd: thrd_t, retval: *mut c_int) -> c_int {
 }
 
 /// See <https://pubs.opengroup.org/onlinepubs/9799919799/functions/thrd_sleep.html>.
+///
+/// `clock_nanosleep` reports the error as its return value, not through
+/// `errno`; C11 wants `0`, `-1` for an interruption and another negative
+/// value for a failure.  There are no signals, so only the last two remain.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn thrd_sleep(time1: &timespec, time2: *mut timespec) -> c_int {
-    ERRNO.set(0);
-    let ret = clock_nanosleep(CLOCK_REALTIME, 0, time1, time2);
-    let new_errno = ERRNO.get();
-    match ret {
+    match unsafe { clock_nanosleep(CLOCK_REALTIME, 0, time1, time2) } {
         0 => 0,
-        -1 if new_errno == EINTR => -1,
+        EINTR => -1,
         _ => -2,
     }
 }

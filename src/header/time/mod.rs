@@ -254,15 +254,56 @@ pub unsafe extern "C" fn clock_gettime(clock_id: clockid_t, tp: *mut timespec) -
 }
 
 /// See <https://pubs.opengroup.org/onlinepubs/9799919799/functions/clock_nanosleep.html>.
-// #[unsafe(no_mangle)]
-#[expect(unused_variables, reason = "function not yet implemented")]
-pub extern "C" fn clock_nanosleep(
+///
+/// POSIX reports failure as the return value rather than through `errno`.  An
+/// absolute deadline is turned into a relative interval against the same
+/// clock and then slept through the PAL, so the calling thread parks instead
+/// of spinning.  There are no signals, so `rmtp` is never written.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn clock_nanosleep(
     clock_id: clockid_t,
     flags: c_int,
     rqtp: *const timespec,
     rmtp: *mut timespec,
 ) -> c_int {
-    unimplemented!();
+    if rqtp.is_null() || flags & !TIMER_ABSTIME != 0 {
+        return EINVAL;
+    }
+    if clock_id != CLOCK_REALTIME && clock_id != CLOCK_MONOTONIC {
+        return EINVAL;
+    }
+    let request = unsafe { &*rqtp };
+    if request.tv_nsec < 0 || request.tv_nsec >= 1_000_000_000 {
+        return EINVAL;
+    }
+    if flags & TIMER_ABSTIME == 0 {
+        return match unsafe { Sys::nanosleep(rqtp, rmtp) } {
+            Ok(()) => 0,
+            Err(Errno(errno)) => errno,
+        };
+    }
+
+    let mut now = timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    if let Err(Errno(errno)) = Sys::clock_gettime(clock_id, Out::from_mut(&mut now)) {
+        return errno;
+    }
+    let seconds = request.tv_sec.saturating_sub(now.tv_sec);
+    let nanos = i64::from(request.tv_nsec) - i64::from(now.tv_nsec);
+    let total = seconds.saturating_mul(1_000_000_000).saturating_add(nanos);
+    if total <= 0 {
+        return 0;
+    }
+    let relative = timespec {
+        tv_sec: (total / 1_000_000_000) as time_t,
+        tv_nsec: (total % 1_000_000_000) as c_long,
+    };
+    match unsafe { Sys::nanosleep(&relative, rmtp) } {
+        Ok(()) => 0,
+        Err(Errno(errno)) => errno,
+    }
 }
 
 /// See <https://pubs.opengroup.org/onlinepubs/9799919799/functions/clock_getres.html>.
