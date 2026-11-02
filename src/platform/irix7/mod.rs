@@ -1,29 +1,22 @@
 //! IRIX 7 native syscall backend for relibc.
 //!
-//! This is a **scaffold over the provisional IRIX 7 kernel syscall ABI**, not the
-//! final capability-based PAL.  The kernel currently exposes 21 flat, numbered
-//! syscalls to a statically loaded n32 user image:
-//!
-//! ```text
-//!   $2 = number, $4..$7 = arguments, $2 = result
-//!   0xffff_ffff means "failed"; there is no error-code channel
-//! ```
+//! This is the v0 native gate: `syscall 0x1F7`, number in `$2`, arguments in
+//! `$4`–`$7`, `CELL_E_*` status in `$2` and the value in `$3` on return.  The
+//! kernel never returns a libc `errno`; [`STATUS_ERRNO`] maps the status to the
+//! POSIX value this libc reports through `errno`.
 //!
 //! Real implementations are provided only for the calls the kernel actually
-//! services (the hello/fs probe set).  Everything else returns `ENOSYS`, which
-//! is deliberate: silently pretending to implement `fork`, sockets, signals or
-//! timers would misrepresent the platform.
+//! services.  Everything else returns `ENOSYS`, which is deliberate: silently
+//! pretending to implement `fork`, sockets, signals or timers would misrepresent
+//! the platform.
 //!
-//! Known mismatches that the shim papers over and the report records:
+//! Known limits of the v0 ABI:
 //!
-//! * The kernel's `struct stat` is a private 128-byte layout, not relibc's n32
-//!   `struct stat`; [`copy_stat`] translates field by field.
 //! * The kernel's `readdir` is `(fd, index, buf, len)` returning a type byte,
 //!   not `getdents`.  [`Sys::getdents`] synthesises relibc `dirent` records and
-//!   uses the opaque offset as the kernel directory index.
-//! * The kernel returns `-1` for every failure, so errno values below are
-//!   best-effort guesses (`EBADF`, `ENOENT`, `EIO`), not kernel-provided codes.
-//! * `getentropy` succeeds but the kernel fills the buffer with zeroes.
+//!   uses the opaque offset as the kernel directory index; there is no
+//!   directory cookie to advance.
+//! * `getentropy` reports success but the kernel zero-fills the buffer.
 //! * `poll` ignores its timeout; `nanosleep` is a busy wait.
 //! * There is no process, thread, signal or socket support, hence the ENOSYS
 //!   stubs in [`PalSignal`], [`PalSocket`], [`PalEpoll`] and [`PalPtrace`].
@@ -41,7 +34,7 @@ use crate::{
     error::{Errno, Result},
     header::{
         dirent::dirent,
-        errno::{EBADF, EINVAL, EIO, ENOENT, ENOMEM, ENOSYS, ERANGE},
+        errno::{EINVAL, EIO, ENOSYS},
         fcntl::AT_FDCWD,
         signal::{sigaction, sigevent, siginfo_t, sigval, stack_t},
         sys_epoll::epoll_event,
@@ -84,160 +77,97 @@ const SYS_READDIR: usize = 19;
 const SYS_NANOSLEEP: usize = 20;
 const SYS_CHDIR: usize = 21;
 
-/// The kernel returns all ones from `$2` when a syscall fails.
-const SYS_ERROR: usize = usize::MAX;
-
-// MIPS `syscall`: number in `$2`, arguments in `$4`..`$7`, result in `$2`.
-#[inline(always)]
-unsafe fn syscall0(n: usize) -> usize {
-    let result: usize;
-    unsafe {
-        asm!(
-            "syscall",
-            inout("$2") n => result,
-            out("$4") _,
-            out("$5") _,
-            out("$6") _,
-            out("$7") _,
-            options(nostack),
-        );
-    }
-    result
-}
-
-#[inline(always)]
-unsafe fn syscall1(n: usize, a0: usize) -> usize {
-    let result: usize;
-    unsafe {
-        asm!(
-            "syscall",
-            inout("$2") n => result,
-            inout("$4") a0 => _,
-            out("$5") _,
-            out("$6") _,
-            out("$7") _,
-            options(nostack),
-        );
-    }
-    result
-}
-
-#[inline(always)]
-unsafe fn syscall2(n: usize, a0: usize, a1: usize) -> usize {
-    let result: usize;
-    unsafe {
-        asm!(
-            "syscall",
-            inout("$2") n => result,
-            inout("$4") a0 => _,
-            inout("$5") a1 => _,
-            out("$6") _,
-            out("$7") _,
-            options(nostack),
-        );
-    }
-    result
-}
-
-#[inline(always)]
-unsafe fn syscall3(n: usize, a0: usize, a1: usize, a2: usize) -> usize {
-    let result: usize;
-    unsafe {
-        asm!(
-            "syscall",
-            inout("$2") n => result,
-            inout("$4") a0 => _,
-            inout("$5") a1 => _,
-            inout("$6") a2 => _,
-            out("$7") _,
-            options(nostack),
-        );
-    }
-    result
-}
-
-#[inline(always)]
-unsafe fn syscall4(n: usize, a0: usize, a1: usize, a2: usize, a3: usize) -> usize {
-    let result: usize;
-    unsafe {
-        asm!(
-            "syscall",
-            inout("$2") n => result,
-            inout("$4") a0 => _,
-            inout("$5") a1 => _,
-            inout("$6") a2 => _,
-            inout("$7") a3 => _,
-            options(nostack),
-        );
-    }
-    result
-}
-
-/// Map the kernel's success/`0xffff_ffff` convention onto [`Result`].
+/// Map a `CELL_E_*` status to the POSIX `errno` value.
 ///
-/// There is no errno channel, so [`EIO`] is the generic answer.  Individual
-/// call sites narrow it where the kernel's behaviour makes the cause obvious.
-fn e_raw(ret: usize) -> Result<usize> {
-    if ret == SYS_ERROR {
-        Err(Errno(EIO))
+/// This mirrors `crates/native-abi/src/status.rs::status_to_errno` in the
+/// kernel repository; the two tables are the shared error contract.
+const STATUS_ERRNO: [c_int; 53] = [
+    0,   // CELL_OK
+    1,   // EPERM
+    2,   // ENOENT
+    4,   // EINTR
+    5,   // EIO
+    9,   // EBADF
+    11,  // EAGAIN
+    12,  // ENOMEM
+    13,  // EACCES
+    14,  // EFAULT
+    16,  // EBUSY
+    17,  // EEXIST
+    22,  // EINVAL
+    28,  // ENOSPC
+    20,  // ENOTDIR
+    21,  // EISDIR
+    39,  // ENOTEMPTY
+    95,  // ENOTSUP
+    75,  // EOVERFLOW
+    110, // ETIMEDOUT
+    125, // ECANCELED
+    9,   // E_REVOKED -> EBADF
+    90,  // EMSGSIZE
+    71,  // EPROTO
+    111, // ECONNREFUSED
+    107, // ENOTCONN
+    98,  // EADDRINUSE
+    101, // ENETUNREACH
+    113, // EHOSTUNREACH
+    36,  // ENAMETOOLONG
+    40,  // ELOOP
+    10,  // ECHILD
+    3,   // ESRCH
+    38,  // ENOSYS
+    32,  // EPIPE
+    34,  // ERANGE
+    33,  // EDOM
+    35,  // EDEADLK
+    37,  // ENOLCK
+    42,  // ENOMSG
+    43,  // EIDRM
+    25,  // ENOTTY
+    29,  // ESPIPE
+    26,  // ETXTBSY
+    27,  // EFBIG
+    31,  // EMLINK
+    30,  // EROFS
+    19,  // ENODEV
+    6,   // ENXIO
+    15,  // ENOTBLK
+    7,   // E2BIG
+    24,  // EMFILE
+    23,  // ENFILE
+];
+
+/// Invoke the native gate.
+///
+/// The kernel writes the status to `$2` and the value to `$3`; every path that
+/// does not exit returns through here so the status-to-errno mapping exists in
+/// exactly one place.
+#[inline(always)]
+unsafe fn syscall(n: usize, a0: usize, a1: usize, a2: usize, a3: usize) -> Result<usize> {
+    let status: usize;
+    let value: usize;
+    unsafe {
+        asm!(
+            "syscall 0x1F7",
+            inout("$2") n => status,
+            lateout("$3") value,
+            in("$4") a0,
+            in("$5") a1,
+            in("$6") a2,
+            in("$7") a3,
+            options(nostack),
+        );
+    }
+    if status == 0 {
+        Ok(value)
     } else {
-        Ok(ret)
+        let errno = STATUS_ERRNO.get(status).copied().unwrap_or(EIO);
+        Err(Errno(errno))
     }
 }
 
 fn enosys<T>() -> Result<T> {
     Err(Errno(ENOSYS))
-}
-
-/// The kernel's private `struct stat` (`kernel/src/user.rs::KernelStat`).
-///
-/// This is **not** relibc's n32 `struct stat`; see [`copy_stat`].
-#[repr(C)]
-struct KernelStat {
-    st_dev: u64,
-    st_ino: u64,
-    st_mode: u32,
-    st_nlink: u32,
-    st_uid: u32,
-    st_gid: u32,
-    st_rdev: u64,
-    st_size: i64,
-    st_blksize: i32,
-    _pad: u32,
-    st_blocks: i64,
-    st_atim: [i64; 2],
-    st_mtim: [i64; 2],
-    st_ctim: [i64; 2],
-    spare: [u8; 16],
-}
-
-fn copy_stat(from: &KernelStat, to: *mut stat) {
-    // SAFETY: callers pass a non-NULL, aligned `struct stat` pointer.
-    unsafe {
-        (*to).st_dev = from.st_dev;
-        (*to).st_ino = from.st_ino;
-        (*to).st_nlink = from.st_nlink as nlink_t;
-        (*to).st_mode = from.st_mode as mode_t;
-        (*to).st_uid = from.st_uid as uid_t;
-        (*to).st_gid = from.st_gid as gid_t;
-        (*to).st_rdev = from.st_rdev;
-        (*to).st_size = from.st_size;
-        (*to).st_blksize = from.st_blksize as blksize_t;
-        (*to).st_blocks = from.st_blocks;
-        (*to).st_atim = timespec {
-            tv_sec: from.st_atim[0],
-            tv_nsec: from.st_atim[1] as c_long,
-        };
-        (*to).st_mtim = timespec {
-            tv_sec: from.st_mtim[0],
-            tv_nsec: from.st_mtim[1] as c_long,
-        };
-        (*to).st_ctim = timespec {
-            tv_sec: from.st_ctim[0],
-            tv_nsec: from.st_ctim[1] as c_long,
-        };
-        (*to)._pad = [0; 24];
-    }
 }
 
 /// Fill a fixed-size C string array, truncating at the array length.
@@ -264,12 +194,8 @@ impl Sys {
             // pointer in its range check.
             return Ok(0);
         }
-        let ret = unsafe { syscall2(SYS_POLL, fds.as_mut_ptr() as usize, fds.len()) };
-        if ret == SYS_ERROR {
-            Err(Errno(EIO))
-        } else {
-            Ok(ret as c_int)
-        }
+        let ready = unsafe { syscall(SYS_POLL, fds.as_mut_ptr() as usize, fds.len(), 0, 0) }?;
+        Ok(ready as c_int)
     }
 }
 
@@ -286,7 +212,7 @@ impl Pal for Sys {
     }
 
     fn chdir(path: CStr) -> Result<()> {
-        e_raw(unsafe { syscall1(SYS_CHDIR, path.as_ptr() as usize) }).map(|_| ())
+        unsafe { syscall(SYS_CHDIR, path.as_ptr() as usize, 0, 0, 0) }.map(|_| ())
     }
 
     fn clock_getres(_clk_id: clockid_t, _tp: Option<Out<timespec>>) -> Result<()> {
@@ -294,10 +220,18 @@ impl Pal for Sys {
     }
 
     fn clock_gettime(clk_id: clockid_t, mut tp: Out<timespec>) -> Result<()> {
-        // The kernel writes { i64 sec, i32 nsec, u32 pad }, which is exactly
-        // relibc's n32 `timespec` (16 bytes including tail padding).
-        e_raw(unsafe { syscall2(SYS_CLOCK_GETTIME, clk_id as usize, tp.as_mut_ptr() as usize) })
-            .map(|_| ())
+        // The kernel writes relibc's n32 `timespec` directly (16 bytes,
+        // 64-bit seconds, 32-bit nanoseconds plus tail padding).
+        unsafe {
+            syscall(
+                SYS_CLOCK_GETTIME,
+                clk_id as usize,
+                tp.as_mut_ptr() as usize,
+                0,
+                0,
+            )
+        }
+        .map(|_| ())
     }
 
     unsafe fn clock_settime(_clk_id: clockid_t, _tp: *const timespec) -> Result<()> {
@@ -305,21 +239,12 @@ impl Pal for Sys {
     }
 
     fn close(fildes: c_int) -> Result<()> {
-        let ret = unsafe { syscall1(SYS_CLOSE, fildes as usize) };
-        if ret == SYS_ERROR {
-            Err(Errno(EBADF))
-        } else {
-            Ok(())
-        }
+        unsafe { syscall(SYS_CLOSE, fildes as usize, 0, 0, 0) }.map(|_| ())
     }
 
     fn dup(fildes: c_int) -> Result<c_int> {
-        let ret = unsafe { syscall1(SYS_DUP, fildes as usize) };
-        if ret == SYS_ERROR {
-            Err(Errno(EBADF))
-        } else {
-            Ok(ret as c_int)
-        }
+        let fd = unsafe { syscall(SYS_DUP, fildes as usize, 0, 0, 0) }?;
+        Ok(fd as c_int)
     }
 
     fn dup2(_fildes: c_int, _fildes2: c_int) -> Result<c_int> {
@@ -345,7 +270,7 @@ impl Pal for Sys {
 
     fn exit(status: c_int) -> ! {
         unsafe {
-            syscall1(SYS_EXIT, status as usize);
+            let _ = syscall(SYS_EXIT, status as usize, 0, 0, 0);
         }
         unreachable!("the kernel always exits on SYS_EXIT")
     }
@@ -382,35 +307,17 @@ impl Pal for Sys {
     }
 
     fn fstat(fildes: c_int, mut buf: Out<stat>) -> Result<()> {
-        let mut kernel = KernelStat {
-            st_dev: 0,
-            st_ino: 0,
-            st_mode: 0,
-            st_nlink: 0,
-            st_uid: 0,
-            st_gid: 0,
-            st_rdev: 0,
-            st_size: 0,
-            st_blksize: 0,
-            _pad: 0,
-            st_blocks: 0,
-            st_atim: [0; 2],
-            st_mtim: [0; 2],
-            st_ctim: [0; 2],
-            spare: [0; 16],
-        };
-        let ret = unsafe {
-            syscall2(
+        // The kernel writes relibc's 136-byte n32 `struct stat` directly.
+        unsafe {
+            syscall(
                 SYS_FSTAT,
                 fildes as usize,
-                ptr::from_mut(&mut kernel) as usize,
+                buf.as_mut_ptr() as usize,
+                0,
+                0,
             )
-        };
-        if ret == SYS_ERROR {
-            return Err(Errno(EBADF));
         }
-        copy_stat(&kernel, buf.as_mut_ptr());
-        Ok(())
+        .map(|_| ())
     }
 
     fn fstatat(fildes: c_int, path: Option<CStr>, mut buf: Out<stat>, _flags: c_int) -> Result<()> {
@@ -422,34 +329,9 @@ impl Pal for Sys {
                 if fildes != AT_FDCWD {
                     return enosys();
                 }
-                let mut kernel = KernelStat {
-                    st_dev: 0,
-                    st_ino: 0,
-                    st_mode: 0,
-                    st_nlink: 0,
-                    st_uid: 0,
-                    st_gid: 0,
-                    st_rdev: 0,
-                    st_size: 0,
-                    st_blksize: 0,
-                    _pad: 0,
-                    st_blocks: 0,
-                    st_atim: [0; 2],
-                    st_mtim: [0; 2],
-                    st_ctim: [0; 2],
-                    spare: [0; 16],
-                };
-                let ret = unsafe {
-                    syscall2(
-                        SYS_STAT,
-                        path.as_ptr() as usize,
-                        ptr::from_mut(&mut kernel) as usize,
-                    )
-                };
-                if ret == SYS_ERROR {
-                    return Err(Errno(ENOENT));
-                }
-                copy_stat(&kernel, buf.as_mut_ptr());
+                unsafe {
+                    syscall(SYS_STAT, path.as_ptr() as usize, buf.as_mut_ptr() as usize, 0, 0)
+                }?;
                 return Ok(());
             }
         }
@@ -461,13 +343,19 @@ impl Pal for Sys {
     }
 
     fn fcntl(fildes: c_int, cmd: c_int, arg: c_ulonglong) -> Result<c_int> {
-        // The kernel's fcntl is an unconditional success with no side effects
-        // (traps.rs case 8).  Passing it through keeps F_GETFD/F_SETFD working
-        // for stdio, but no command is actually interpreted.
-        Ok(
-            e_raw(unsafe { syscall3(SYS_FCNTL, fildes as usize, cmd as usize, arg as usize) })?
-                as c_int,
-        )
+        // The kernel treats fcntl as an unconditional success with no side
+        // effects.  Passing it through keeps F_GETFD/F_SETFD working for stdio,
+        // but no command is actually interpreted.
+        let value = unsafe {
+            syscall(
+                SYS_FCNTL,
+                fildes as usize,
+                cmd as usize,
+                arg as usize,
+                0,
+            )
+        }?;
+        Ok(value as c_int)
     }
 
     unsafe fn fork() -> Result<pid_t> {
@@ -487,11 +375,15 @@ impl Pal for Sys {
     }
 
     unsafe fn futex_wait(_addr: *mut u32, _val: u32, _deadline: Option<&timespec>) -> Result<()> {
-        enosys()
+        // One thread: no one can change the word while we look at it, so there
+        // is nothing to wait for.  Reporting success keeps the generic mutex
+        // path from treating an absent futex as a fatal error.
+        Ok(())
     }
 
     unsafe fn futex_wake(_addr: *mut u32, _num: u32) -> Result<u32> {
-        enosys()
+        // As above: there are no waiters to wake.
+        Ok(0)
     }
 
     unsafe fn utimensat(
@@ -504,18 +396,16 @@ impl Pal for Sys {
     }
 
     fn getcwd(mut buf: Out<[u8]>) -> Result<()> {
-        let ret = unsafe {
-            syscall2(
+        unsafe {
+            syscall(
                 SYS_GETCWD,
                 buf.as_mut_ptr().as_mut_ptr() as usize,
                 buf.len(),
+                0,
+                0,
             )
-        };
-        if ret == SYS_ERROR {
-            Err(Errno(ERANGE))
-        } else {
-            Ok(())
         }
+        .map(|_| ())
     }
 
     fn getdents(fd: c_int, buf: &mut [u8], opaque_offset: u64) -> Result<usize> {
@@ -532,17 +422,16 @@ impl Pal for Sys {
         }
         let mut name = [0u8; 256];
         let kind = unsafe {
-            syscall4(
+            syscall(
                 SYS_READDIR,
                 fd as usize,
                 opaque_offset as usize,
                 name.as_mut_ptr() as usize,
                 name.len(),
             )
-        };
+        }?;
         match kind {
             0 => Ok(0),
-            SYS_ERROR => Err(Errno(EBADF)),
             kind => {
                 let mut dent = dirent {
                     d_ino: opaque_offset + 1,
@@ -616,7 +505,9 @@ impl Pal for Sys {
     }
 
     fn getpid() -> pid_t {
-        unsafe { syscall0(SYS_GETPID) as pid_t }
+        unsafe { syscall(SYS_GETPID, 0, 0, 0, 0) }
+            .map(|pid| pid as pid_t)
+            .unwrap_or(0)
     }
 
     fn getppid() -> pid_t {
@@ -635,9 +526,7 @@ impl Pal for Sys {
             // Avoid asking the kernel to range-check a dangling empty slice.
             return Ok(0);
         }
-        e_raw(unsafe {
-            syscall2(SYS_GETENTROPY, buf.as_mut_ptr() as usize, buf.len())
-        })
+        unsafe { syscall(SYS_GETENTROPY, buf.as_mut_ptr() as usize, buf.len(), 0, 0) }
     }
 
     fn getresgid(
@@ -754,12 +643,16 @@ impl Pal for Sys {
     ) -> Result<*mut c_void> {
         // Provisional mmap(addr, length, prot, flags): the kernel ignores the
         // address, protection and flags and bumps a fixed 1 MiB heap.
-        let ret = unsafe { syscall4(SYS_MMAP, addr as usize, len, prot as usize, flags as usize) };
-        if ret == SYS_ERROR {
-            Err(Errno(ENOMEM))
-        } else {
-            Ok(ret as *mut c_void)
-        }
+        let address = unsafe {
+            syscall(
+                SYS_MMAP,
+                addr as usize,
+                len,
+                prot as usize,
+                flags as usize,
+            )
+        }?;
+        Ok(address as *mut c_void)
     }
 
     unsafe fn mremap(
@@ -773,7 +666,7 @@ impl Pal for Sys {
     }
 
     unsafe fn mprotect(addr: *mut c_void, len: usize, prot: c_int) -> Result<()> {
-        e_raw(unsafe { syscall3(SYS_MPROTECT, addr as usize, len, prot as usize) }).map(|_| ())
+        unsafe { syscall(SYS_MPROTECT, addr as usize, len, prot as usize, 0) }.map(|_| ())
     }
 
     unsafe fn msync(_addr: *mut c_void, _len: usize, _flags: c_int) -> Result<()> {
@@ -796,12 +689,12 @@ impl Pal for Sys {
     unsafe fn munmap(addr: *mut c_void, len: usize) -> Result<()> {
         // The v0 heap is one-way; the kernel returns success and releases the
         // mappings at process exit.
-        e_raw(unsafe { syscall2(SYS_MUNMAP, addr as usize, len) }).map(|_| ())
+        unsafe { syscall(SYS_MUNMAP, addr as usize, len, 0, 0) }.map(|_| ())
     }
 
     unsafe fn nanosleep(rqtp: *const timespec, _rmtp: *mut timespec) -> Result<()> {
         // The kernel busy-waits and does not report the remaining time.
-        e_raw(unsafe { syscall1(SYS_NANOSLEEP, rqtp as usize) }).map(|_| ())
+        unsafe { syscall(SYS_NANOSLEEP, rqtp as usize, 0, 0, 0) }.map(|_| ())
     }
 
     fn openat(dirfd: c_int, path: CStr, oflag: c_int, _mode: mode_t) -> Result<c_int> {
@@ -809,12 +702,8 @@ impl Pal for Sys {
             // Relative paths always resolve against the kernel cwd.
             return enosys();
         }
-        let ret = unsafe { syscall3(SYS_OPEN, path.as_ptr() as usize, oflag as usize, 0) };
-        if ret == SYS_ERROR {
-            Err(Errno(ENOENT))
-        } else {
-            Ok(ret as c_int)
-        }
+        let fd = unsafe { syscall(SYS_OPEN, path.as_ptr() as usize, oflag as usize, 0, 0) }?;
+        Ok(fd as c_int)
     }
 
     fn pipe2(_fildes: Out<[c_int; 2]>, _flags: c_int) -> Result<()> {
@@ -854,19 +743,16 @@ impl Pal for Sys {
             // rejects the dangling pointer of an empty Rust slice.
             return Ok(0);
         }
-        let ret = unsafe {
-            syscall3(
+        let count = unsafe {
+            syscall(
                 SYS_READ,
                 fildes as usize,
                 buf.as_mut_ptr() as usize,
                 buf.len(),
+                0,
             )
-        };
-        if ret == SYS_ERROR {
-            Err(Errno(EBADF))
-        } else {
-            Ok(ret)
-        }
+        }?;
+        Ok(count)
     }
 
     fn pread(_fildes: c_int, _buf: &mut [u8], _offset: off_t) -> Result<usize> {
@@ -1014,12 +900,16 @@ impl Pal for Sys {
         if buf.is_empty() {
             return Ok(0);
         }
-        let ret = unsafe { syscall3(SYS_WRITE, fildes as usize, buf.as_ptr() as usize, buf.len()) };
-        if ret == SYS_ERROR {
-            Err(Errno(EBADF))
-        } else {
-            Ok(ret)
-        }
+        let count = unsafe {
+            syscall(
+                SYS_WRITE,
+                fildes as usize,
+                buf.as_ptr() as usize,
+                buf.len(),
+                0,
+            )
+        }?;
+        Ok(count)
     }
 
     fn pwrite(_fildes: c_int, _buf: &[u8], _offset: off_t) -> Result<usize> {
@@ -1047,8 +937,9 @@ impl Pal for Sys {
 
     fn verify() -> bool {
         // The only platform check available: the ABI's getpid must answer.
-        let pid = unsafe { syscall0(SYS_GETPID) };
-        pid != SYS_ERROR && pid != 0
+        unsafe { syscall(SYS_GETPID, 0, 0, 0, 0) }
+            .map(|pid| pid != 0)
+            .unwrap_or(false)
     }
 }
 
@@ -1254,7 +1145,6 @@ const _: () = {
     use core::mem::offset_of;
     use crate::header::{dirent::dirent, poll::pollfd, time::timespec};
 
-    assert!(size_of::<KernelStat>() == 128);
     assert!(size_of::<stat>() == 136);
     assert!(offset_of!(stat, st_nlink) == 16);
     assert!(offset_of!(stat, st_mode) == 20);

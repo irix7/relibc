@@ -24,8 +24,12 @@ struct Record {
     data: *mut c_void,
 }
 
+#[cfg(not(target_os = "irix7"))]
 #[thread_local]
 static VALUES: RefCell<BTreeMap<pthread_key_t, Record>> = RefCell::new(BTreeMap::new());
+#[cfg(target_os = "irix7")]
+static VALUES: crate::platform::SingleThread<RefCell<BTreeMap<pthread_key_t, Record>>> =
+    crate::platform::SingleThread(RefCell::new(BTreeMap::new()));
 static KEYS: Mutex<BTreeMap<pthread_key_t, Dtor>> = Mutex::new(BTreeMap::new());
 static NEXTKEY: AtomicUsize = AtomicUsize::new(1);
 

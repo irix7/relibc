@@ -49,7 +49,10 @@ pub const RTLD_DEFAULT: *mut c_void = 0 as *mut c_void; // XXX: cbindgen doesn't
 
 static ERROR_NOT_SUPPORTED: &core::ffi::CStr = c"dlfcn not supported";
 
+#[cfg(not(target_os = "irix7"))]
 #[thread_local]
+static ERROR: AtomicUsize = AtomicUsize::new(0);
+#[cfg(target_os = "irix7")]
 static ERROR: AtomicUsize = AtomicUsize::new(0);
 
 fn set_last_error(error: DlError) {

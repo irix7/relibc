@@ -38,7 +38,11 @@ pub(crate) mod sys;
 pub use self::rlb::{Line, RawLineBuffer};
 pub mod rlb;
 
-#[cfg(any(target_os = "linux", target_os = "irix7"))]
+#[cfg(target_os = "irix7")]
+#[path = "auxv_defs_irix7.rs"]
+pub mod auxv_defs;
+
+#[cfg(target_os = "linux")]
 #[path = "auxv_defs.rs"]
 pub mod auxv_defs;
 
@@ -53,34 +57,74 @@ pub mod types;
 #[thread_local]
 pub static ERRNO: Cell<c_int> = Cell::new(0);
 
-/// Single-threaded errno storage for IRIX 7.
+/// `errno` storage on the main-thread TCB.
 ///
-/// The IRIX 7 kernel does not set a thread pointer and the target declares
-/// `has-thread-local: false`, so a `#[thread_local]` errno would dereference
-/// whatever `$29`/UserLocal happens to hold.  Until the kernel gains TLS and
-/// the PAL learns to activate a TCB, errno is one global.  This makes the
-/// whole library single-threaded, which matches the current kernel.
+/// The native image's `_start` sets `$28` to a 16-byte TCB: `self` at 0, `dtv`
+/// at 4, `errno` at 8 and libc-private space at 12.  `__errno_location` is
+/// therefore `TP + 8`, and this type reads and writes that slot directly.  The
+/// target declares `has-thread-local: false`; there is no ELF TLS block.
 #[cfg(target_os = "irix7")]
-pub struct SingleThreadErrno(UnsafeCell<c_int>);
+#[inline(always)]
+fn thread_pointer() -> *mut c_int {
+    let tp: usize;
+    // SAFETY: reading `$28` has no side effects.  `_start` establishes the TCB
+    // before any Rust code runs, and the kernel preserves `$28` across the
+    // native gate.
+    unsafe {
+        core::arch::asm!("move {tp}, $28", tp = out(reg) tp, options(nomem, nostack));
+    }
+    tp as *mut c_int
+}
+
 #[cfg(target_os = "irix7")]
-// SAFETY: the IRIX 7 kernel runs one thread; there is no concurrent access.
-unsafe impl Sync for SingleThreadErrno {}
+#[inline(always)]
+fn errno_slot() -> *mut c_int {
+    // TP points at the start of the TCB; errno is the third 32-bit word.
+    unsafe { thread_pointer().cast::<u8>().add(8).cast::<c_int>() }
+}
+
 #[cfg(target_os = "irix7")]
-impl SingleThreadErrno {
+pub struct TcbErrno;
+
+#[cfg(target_os = "irix7")]
+impl TcbErrno {
     pub fn get(&self) -> c_int {
-        // SAFETY: single-threaded as above.
-        unsafe { *self.0.get() }
+        // SAFETY: the TCB is mapped and errno is a plain 32-bit word.
+        unsafe { core::ptr::read_volatile(errno_slot()) }
     }
     pub fn set(&self, value: c_int) {
-        // SAFETY: single-threaded as above.
-        unsafe { *self.0.get() = value };
+        // SAFETY: as above.
+        unsafe { core::ptr::write_volatile(errno_slot(), value) };
     }
     pub fn as_ptr(&self) -> *mut c_int {
-        self.0.get()
+        errno_slot()
     }
 }
 #[cfg(target_os = "irix7")]
-pub static ERRNO: SingleThreadErrno = SingleThreadErrno(UnsafeCell::new(0));
+pub static ERRNO: TcbErrno = TcbErrno;
+
+/// A `static` that is shared by the whole process because the platform has no
+/// threads.
+///
+/// Rust requires `static` items to be `Sync`, but `Cell` and `RefCell` are
+/// deliberately not.  The IRIX 7 kernel runs one thread, so the interior
+/// mutability cannot race; this wrapper states that fact at each declaration
+/// instead of weakening the type globally.
+#[cfg(target_os = "irix7")]
+pub struct SingleThread<T>(pub T);
+
+// SAFETY: the IRIX 7 kernel has no threads and no signal delivery, so there is
+// no concurrent access to these values.
+#[cfg(target_os = "irix7")]
+unsafe impl<T> Sync for SingleThread<T> {}
+
+#[cfg(target_os = "irix7")]
+impl<T> core::ops::Deref for SingleThread<T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        &self.0
+    }
+}
 
 /// The `argv` argument available to a program's `main` function.
 // TODO: change remaining static mut to RawCell
@@ -93,6 +137,39 @@ pub static mut program_invocation_short_name: *mut c_char = ptr::null_mut();
 pub static mut environ: *mut *mut c_char = ptr::null_mut();
 
 pub static OUR_ENVIRON: RawCell<Vec<*mut c_char>> = RawCell::new(Vec::new());
+
+/// Auxiliary-vector pointer handed to `_start` in `$a3`.
+///
+/// The kernel builds the System V stack and passes `$a3 = auxv`; `crt0`
+/// stores that pointer here before entering Rust, and [`crate::start::Stack`]
+/// returns it.  It is a plain word rather than an argument so the stack shape
+/// stays exactly the System V one the kernel writes.
+#[cfg(target_os = "irix7")]
+#[unsafe(no_mangle)]
+pub static mut __irix7_auxv: usize = 0;
+
+/// Look up one auxiliary-vector entry.
+///
+/// The vector is the one the kernel passed in `$a3`; the numbering is the
+/// native one in [`auxv_defs`], not Linux's.
+#[cfg(target_os = "irix7")]
+pub fn getauxval(kind: usize) -> usize {
+    // SAFETY: the pointer is set by `_start` before Rust runs and points at a
+    // kernel-built, AT_NULL-terminated array of [type, value] pairs.
+    unsafe {
+        let mut at = __irix7_auxv as *const usize;
+        if at.is_null() {
+            return 0;
+        }
+        while *at != 0 {
+            if *at == kind {
+                return *at.add(1);
+            }
+            at = at.add(2);
+        }
+        0
+    }
+}
 
 pub fn environ_iter() -> impl Iterator<Item = *mut c_char> + 'static {
     unsafe {
@@ -354,15 +431,13 @@ pub unsafe fn get_auxvs(ptr: *const usize) -> Box<[[usize; 2]]> {
     auxvs.into_boxed_slice()
 }
 
-/// IRIX 7 has no auxiliary vector yet.
-///
-/// The kernel's initial stack in `kernel/src/user.rs` contains argc, argv and
-/// envp only; there is no ELF auxv terminator after them.  Iterating it would
-/// walk off into the environment strings, so report an empty vector and let
-/// relibc's getauxval paths fall back to their defaults.
+/// IRIX 7 supplies the auxiliary vector in `$a3`; parse it with the native
+/// numbering in [`auxv_defs`].
 #[cfg(target_os = "irix7")]
-pub unsafe fn get_auxvs(_ptr: *const usize) -> Box<[[usize; 2]]> {
-    Vec::new().into_boxed_slice()
+pub unsafe fn get_auxvs(ptr: *const usize) -> Box<[[usize; 2]]> {
+    let mut auxvs = unsafe { auxv_iter(ptr) }.collect::<Vec<_>>();
+    auxvs.sort_unstable_by_key(|[kind, _]| *kind);
+    auxvs.into_boxed_slice()
 }
 // TODO: Find an auxv replacement for Redox's execv protocol
 #[cold]

@@ -15,6 +15,9 @@ pub extern "C" fn __errno() -> *mut c_int {
 
 /// Provide a pointer to relibc's internal `errno` variable.
 ///
+/// On the native IRIX 7 target this is `TP + 8`: `$28` points at the 16-byte
+/// main-thread TCB, whose third word is `errno`.
+///
 /// This is the basis of the C-facing macro definition of `errno`, and should
 /// not be used directly.
 #[unsafe(no_mangle)]

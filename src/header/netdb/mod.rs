@@ -207,8 +207,12 @@ pub static mut NET_ADDR: Option<u32> = None;
 static mut N_POS: usize = 0;
 static mut NET_STAYOPEN: c_int = 0;
 
+#[cfg(not(target_os = "irix7"))]
 #[thread_local]
 pub static H_ERRNO: Cell<c_int> = Cell::new(0);
+#[cfg(target_os = "irix7")]
+pub static H_ERRNO: crate::platform::SingleThread<Cell<c_int>> =
+    crate::platform::SingleThread(Cell::new(0));
 const H_UNSET: c_int = 0;
 pub const HOST_NOT_FOUND: c_int = 1;
 pub const NO_DATA: c_int = 2;

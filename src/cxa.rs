@@ -18,8 +18,12 @@ struct CxaThreadAtExitFunc {
 }
 
 static CXA_ATEXIT_FUNCS: Mutex<Vec<Option<CxaAtExitFunc>>> = Mutex::new(Vec::new());
+#[cfg(not(target_os = "irix7"))]
 #[thread_local]
 static DTORS: RefCell<Vec<CxaThreadAtExitFunc>> = RefCell::new(Vec::new());
+#[cfg(target_os = "irix7")]
+static DTORS: crate::platform::SingleThread<RefCell<Vec<CxaThreadAtExitFunc>>> =
+    crate::platform::SingleThread(RefCell::new(Vec::new()));
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __cxa_atexit(

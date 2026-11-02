@@ -61,6 +61,15 @@ impl<'a> Stack<'a> {
     }
 
     pub fn auxv(&self) -> *const (usize, usize) {
+        // The IRIX 7 loader passes the auxiliary vector in `$a3` in addition to
+        // the System V stack; `_start` stores it before entering Rust.
+        #[cfg(target_os = "irix7")]
+        {
+            let auxv = unsafe { crate::platform::__irix7_auxv };
+            if auxv != 0 {
+                return auxv as *const (usize, usize);
+            }
+        }
         unsafe {
             let mut envp = self.envp_raw();
             while !(*envp).is_null() {

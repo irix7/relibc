@@ -93,7 +93,10 @@ pub use self::barrier::*;
 pub mod cond;
 pub use self::cond::*;
 
+#[cfg(not(target_os = "irix7"))]
 #[thread_local]
+pub static mut fork_hooks: [LinkedList<extern "C" fn()>; 3] = [const { LinkedList::new() }; 3];
+#[cfg(target_os = "irix7")]
 pub static mut fork_hooks: [LinkedList<extern "C" fn()>; 3] = [const { LinkedList::new() }; 3];
 
 /// See <https://pubs.opengroup.org/onlinepubs/9799919799/functions/pthread_cancel.html>.
@@ -322,9 +325,14 @@ pub(crate) struct CleanupLinkedListEntry {
     prev: *const c_void,
 }
 
+#[cfg(not(target_os = "irix7"))]
 #[thread_local]
 pub(crate) static CLEANUP_LL_HEAD: Cell<*const CleanupLinkedListEntry> =
     Cell::new(core::ptr::null());
+#[cfg(target_os = "irix7")]
+pub(crate) static CLEANUP_LL_HEAD:
+    crate::platform::SingleThread<Cell<*const CleanupLinkedListEntry>> =
+    crate::platform::SingleThread(Cell::new(core::ptr::null()));
 
 // TODO: unwind? setjmp/longjmp?
 

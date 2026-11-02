@@ -75,22 +75,44 @@ _start:
 "
 );
 
-// MIPS n32 (IRIX 7).  `$sp` points at the argc/argv/envp block; the kernel
-// does not provide an auxiliary vector.  `-mno-abicalls` is required by the
-// target, so use an absolute `la`/`jalr` call rather than `$gp`-relative
-// abicalls.
-#[cfg(target_arch = "mips64")]
+// MIPS n32 (IRIX 7).  The kernel enters with the System V stack in `$sp`,
+// `$a3` pointing at the auxiliary vector, and `$28` zero.  Establish the
+// main-thread TCB (`self` at 0, `dtv` 0 at 4, `errno` at 8, libc-private at 12)
+// before any Rust code runs, and stash `$a3` for `Stack::auxv`.  MIPS III has
+// no `rdhwr`, so `$28` is the only thread pointer.
+//
+// `-mno-abicalls` is required by the target, so use an absolute `la`/`jalr`
+// call rather than `$gp`-relative abicalls.
+#[cfg(all(target_arch = "mips64", target_os = "irix7"))]
 global_asm!(
     "
     .set noreorder
+    .set mips3
     .globl _start
     .type _start, @function
 _start:
+    lui $8, %hi(__irix7_main_tcb)
+    addiu $8, $8, %lo(__irix7_main_tcb)
+    sw $8, 0($8)                # self
+    sw $zero, 4($8)             # dtv: no ELF TLS on this target
+    sw $zero, 8($8)             # errno
+    sw $zero, 12($8)            # libc-private
+    move $28, $8
+
+    lui $9, %hi(__irix7_auxv)
+    addiu $9, $9, %lo(__irix7_auxv)
+    sw $7, 0($9)                # $a3 = auxv
+
     move $4, $sp
     la $25, relibc_crt0
     jalr $25
     nop
     .size _start, . - _start
+
+    .bss
+    .align 4
+__irix7_main_tcb:
+    .space 16
 "
 );
 

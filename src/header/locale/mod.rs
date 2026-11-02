@@ -31,7 +31,12 @@ pub const LC_GLOBAL_LOCALE: locale_t = -1isize as locale_t;
 /// process-wide locale, used by setlocale() and localeconv()
 static mut GLOBAL_LOCALE: *mut GlobalLocaleData = ptr::null_mut();
 /// thread-wide locale, used by uselocale() and localeconv()
+#[cfg(not(target_os = "irix7"))]
 #[thread_local]
+pub(crate) static mut THREAD_LOCALE: *mut LocaleData = ptr::null_mut();
+/// The native IRIX 7 target is single-threaded, so the thread locale is the
+/// process locale.
+#[cfg(target_os = "irix7")]
 pub(crate) static mut THREAD_LOCALE: *mut LocaleData = ptr::null_mut();
 
 /// See <https://pubs.opengroup.org/onlinepubs/9799919799/functions/localeconv.html>.

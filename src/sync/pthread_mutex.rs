@@ -234,8 +234,12 @@ enum Ty {
 }
 
 // Children after fork can only call async-signal-safe functions until they exec.
+#[cfg(not(target_os = "irix7"))]
 #[thread_local]
 static CACHED_OS_TID_INVALID_AFTER_FORK: Cell<u32> = Cell::new(0);
+#[cfg(target_os = "irix7")]
+static CACHED_OS_TID_INVALID_AFTER_FORK: crate::platform::SingleThread<Cell<u32>> =
+    crate::platform::SingleThread(Cell::new(0));
 
 // Assumes TIDs are unique between processes, which I only know is true for Redox.
 fn os_tid_invalid_after_fork() -> u32 {
