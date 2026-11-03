@@ -108,6 +108,22 @@ const SYS_FORK: usize = 42;
 const SYS_EXECVE: usize = 43;
 const SYS_WAITPID: usize = 44;
 const SYS_GETPPID: usize = 46;
+/// `fchdir(fd)`: the descriptor form of `chdir`, kernel syscall 48.
+const SYS_FCHDIR: usize = 48;
+
+/// Check that `fildes` can be synced.  The in-memory filesystem is always
+/// stable, so a sync only has to name a live descriptor, and a pipe cannot be
+/// synced at all (POSIX `EINVAL`).
+fn check_syncable(fildes: c_int) -> Result<()> {
+    const S_IFMT: u32 = 0o170000;
+    const S_IFIFO: u32 = 0o010000;
+    let mut st: stat = unsafe { core::mem::zeroed() };
+    unsafe { syscall(SYS_FSTAT, fildes as usize, &mut st as *mut stat as usize, 0, 0) }?;
+    if (st.st_mode as u32) & S_IFMT == S_IFIFO {
+        return Err(Errno(EINVAL));
+    }
+    Ok(())
+}
 
 /// Longest a single `SYS_NANOSLEEP` parks.
 ///
@@ -332,6 +348,10 @@ impl Pal for Sys {
         unsafe { syscall(SYS_CHDIR, path.as_ptr() as usize, 0, 0, 0) }.map(|_| ())
     }
 
+    fn fchdir(fildes: c_int) -> Result<()> {
+        unsafe { syscall(SYS_FCHDIR, fildes as usize, 0, 0, 0) }.map(|_| ())
+    }
+
     fn clock_getres(_clk_id: clockid_t, _tp: Option<Out<timespec>>) -> Result<()> {
         enosys()
     }
@@ -428,8 +448,8 @@ impl Pal for Sys {
         enosys()
     }
 
-    fn fdatasync(_fildes: c_int) -> Result<()> {
-        enosys()
+    fn fdatasync(fildes: c_int) -> Result<()> {
+        check_syncable(fildes)
     }
 
     fn flock(_fd: c_int, _operation: c_int) -> Result<()> {
@@ -490,8 +510,8 @@ impl Pal for Sys {
         enosys()
     }
 
-    fn fsync(_fildes: c_int) -> Result<()> {
-        enosys()
+    fn fsync(fildes: c_int) -> Result<()> {
+        check_syncable(fildes)
     }
 
     fn ftruncate(fildes: c_int, length: off_t) -> Result<()> {
@@ -1129,7 +1149,7 @@ impl Pal for Sys {
     }
 
     fn sync() -> Result<()> {
-        enosys()
+        Ok(())
     }
 
     fn timer_create(_clock_id: clockid_t, _evp: &sigevent) -> Result<timer_t> {
