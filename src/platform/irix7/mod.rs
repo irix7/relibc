@@ -430,10 +430,6 @@ impl Pal for Sys {
         unreachable!("SYS_THREAD_EXIT never returns to the caller")
     }
 
-    fn fchdir(_fildes: c_int) -> Result<()> {
-        enosys()
-    }
-
     fn fchmodat(_dirfd: c_int, _path: Option<CStr>, _mode: mode_t, _flags: c_int) -> Result<()> {
         enosys()
     }
