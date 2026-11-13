@@ -110,6 +110,13 @@ const SYS_WAITPID: usize = 44;
 const SYS_GETPPID: usize = 46;
 /// `fchdir(fd)`: the descriptor form of `chdir`, kernel syscall 48.
 const SYS_FCHDIR: usize = 48;
+/// `ioctl(fd, request, arg)`: the terminal requests on the console.
+const SYS_IOCTL: usize = 49;
+const SYS_KILL: usize = 50;
+/// `sigaction(sig, const u32 *disposition, u32 *old)`: `SIG_DFL` or `SIG_IGN`.
+const SYS_SIGACTION: usize = 51;
+const SYS_SETPGID: usize = 52;
+const SYS_GETPGID: usize = 53;
 
 /// Check that `fildes` can be synced.  The in-memory filesystem is always
 /// stable, so a sync only has to name a live descriptor, and a pipe cannot be
@@ -294,6 +301,16 @@ unsafe fn syscall(n: usize, a0: usize, a1: usize, a2: usize, a3: usize) -> Resul
     } else {
         let errno = STATUS_ERRNO.get(status).copied().unwrap_or(EIO);
         Err(Errno(errno))
+    }
+}
+
+impl Sys {
+    /// `ioctl` for the console terminal.  The kernel implements the termios,
+    /// window-size and foreground-group requests and answers `ENOTTY` for
+    /// every other request and for a descriptor that is not the console.
+    pub unsafe fn ioctl(fd: c_int, request: c_ulong, out: *mut c_void) -> Result<c_int> {
+        unsafe { syscall(SYS_IOCTL, fd as usize, request as usize, out as usize, 0) }?;
+        Ok(0)
     }
 }
 
@@ -655,8 +672,9 @@ impl Pal for Sys {
         4096
     }
 
-    fn getpgid(_pid: pid_t) -> Result<pid_t> {
-        enosys()
+    fn getpgid(pid: pid_t) -> Result<pid_t> {
+        let pgid = unsafe { syscall(SYS_GETPGID, pid as usize, 0, 0, 0) }?;
+        Ok(pgid as pid_t)
     }
 
     fn getpid() -> pid_t {
@@ -1110,8 +1128,9 @@ impl Pal for Sys {
         enosys()
     }
 
-    fn setpgid(_pid: pid_t, _pgid: pid_t) -> Result<()> {
-        enosys()
+    fn setpgid(pid: pid_t, pgid: pid_t) -> Result<()> {
+        unsafe { syscall(SYS_SETPGID, pid as usize, pgid as usize, 0, 0) }?;
+        Ok(())
     }
 
     fn setpriority(_which: c_int, _who: id_t, _prio: c_int) -> Result<()> {
@@ -1337,20 +1356,25 @@ impl PalSignal for Sys {
         enosys()
     }
 
-    fn kill(_pid: pid_t, _sig: c_int) -> Result<()> {
-        enosys()
+    fn kill(pid: pid_t, sig: c_int) -> Result<()> {
+        unsafe { syscall(SYS_KILL, pid as usize, sig as usize, 0, 0) }?;
+        Ok(())
     }
 
     fn sigqueue(_pid: pid_t, _sig: c_int, _val: sigval) -> Result<()> {
         enosys()
     }
 
-    fn killpg(_pgrp: pid_t, _sig: c_int) -> Result<()> {
-        enosys()
+    fn killpg(pgrp: pid_t, sig: c_int) -> Result<()> {
+        if pgrp <= 1 {
+            // 0 and 1 would name the caller's group or every process.
+            return Err(Errno(EINVAL));
+        }
+        Self::kill(-pgrp, sig)
     }
 
-    fn raise(_sig: c_int) -> Result<()> {
-        enosys()
+    fn raise(sig: c_int) -> Result<()> {
+        Self::kill(Self::getpid(), sig)
     }
 
     #[expect(deprecated)]
@@ -1363,11 +1387,37 @@ impl PalSignal for Sys {
     }
 
     fn sigaction(
-        _sig: c_int,
-        _act: Option<&sigaction>,
-        _oact: Option<&mut sigaction>,
+        sig: c_int,
+        act: Option<&sigaction>,
+        oact: Option<&mut sigaction>,
     ) -> Result<()> {
-        enosys()
+        // The v0 kernel keeps one word per signal: `SIG_DFL` or `SIG_IGN`.
+        // It rejects a handler address with `ENOSYS` because it cannot run
+        // one; the mask and flags are not passed.
+        let new: u32 = act.map_or(0, |act| act.sa_handler.map_or(0, |handler| handler as usize as u32));
+        let mut old: u32 = 0;
+        unsafe {
+            syscall(
+                SYS_SIGACTION,
+                sig as usize,
+                if act.is_some() {
+                    &raw const new as usize
+                } else {
+                    0
+                },
+                &raw mut old as usize,
+                0,
+            )
+        }?;
+        if let Some(oact) = oact {
+            oact.sa_handler = unsafe {
+                core::mem::transmute::<usize, Option<extern "C" fn(c_int)>>(old as usize)
+            };
+            oact.sa_flags = 0;
+            oact.sa_restorer = None;
+            oact.sa_mask = Default::default();
+        }
+        Ok(())
     }
 
     unsafe fn sigaltstack(_ss: Option<&stack_t>, _old_ss: Option<&mut stack_t>) -> Result<()> {

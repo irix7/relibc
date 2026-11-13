@@ -31,17 +31,9 @@ pub struct sgttyb {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ioctl(fd: c_int, request: c_ulong, out: *mut c_void) -> c_int {
     // TODO: Somehow support varargs to syscall??
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "irix7"))]
     unsafe {
         crate::platform::Sys::ioctl(fd, request, out).or_minus_one_errno()
-    }
-    #[cfg(target_os = "irix7")]
-    {
-        // No ioctl in the provisional ABI; not even ENOTTY can come from the
-        // kernel because it has no device model.
-        let _ = (fd, request, out);
-        crate::platform::ERRNO.set(crate::header::errno::ENOTTY);
-        -1
     }
     #[cfg(target_os = "redox")]
     unsafe { self::redox::ioctl_inner(fd, request, out) }.or_minus_one_errno()
